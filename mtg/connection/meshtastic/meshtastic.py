@@ -24,7 +24,7 @@ from meshtastic import (
 # 3rd party
 from setproctitle import setthreadtitle
 
-from mtg.utils import create_fifo, split_message
+from mtg.utils import create_fifo, split_message, split_user_message
 from mtg.connection.mqtt import MQTTInterface
 
 
@@ -98,7 +98,6 @@ class MeshtasticConnection:
         if self.interface is None:
             return
         self.logger.debug("Sending to mesh: %s %s", msg, kwargs)
-        self.logger.debug("Sending to mesh: %s %s", msg, kwargs)
         if len(msg) < mesh_pb2.Constants.DATA_PAYLOAD_LEN // 2:  # pylint:disable=no-member
             with self.lock:
                 self.interface.sendText(msg, **kwargs)
@@ -106,6 +105,18 @@ class MeshtasticConnection:
         # pylint:disable=no-member
         split_message(msg, mesh_pb2.Constants.DATA_PAYLOAD_LEN // 2, self.interface.sendText, **kwargs)
         return
+
+    def send_user_text(self, sender: str, message: str, **kwargs) -> None:
+        """Send text message from a specific sender with automatic splitting"""
+
+        chunk_len = mesh_pb2.Constants.DATA_PAYLOAD_LEN // 2
+        full = f"{sender}: {message}"
+        if len(full) <= chunk_len:
+            self.send_text(full, **kwargs)
+            return
+        parts = split_user_message(sender, message, chunk_len)
+        for part in parts:
+            self.send_text(part, **kwargs)
 
     def send_data(self, *args, **kwargs) -> None:
         """
