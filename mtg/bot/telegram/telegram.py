@@ -132,9 +132,7 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
         return short_url
 
     def shorten_in_text(self, message: str) -> str:
-        """
-        Shorten URLs in text messages
-        """
+        """Shorten URLs in text messages"""
         splits = message.split(' ')
         replacements = {
             pos: self.shorten_p(part)
@@ -146,6 +144,38 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
             if replacement is not None:
                 splits[pos] = replacement
         return ' '.join([x for x in splits if x])
+
+    def _handle_photo(self, message: str, update: Update) -> str:
+        """Save photo attachment and return updated message."""
+
+        photo = sorted(update.message.photo, key=lambda x: x.file_size, reverse=True)[0]
+        photo_file = photo.get_file()
+        original_filename = os.path.basename(urlparse(photo_file.file_path).path)
+        safe_filename = ''.join(c for c in original_filename if c.isalnum() or c in '._-')
+        if not safe_filename:
+            safe_filename = f'image_{int(time.time())}.jpg'
+        time_stamp = time.strftime('%Y/%m/%d')
+        photo_dir = f'./web/static/t/{time_stamp}'
+        os.makedirs(photo_dir, exist_ok=True)
+        final_path = os.path.abspath(f'{photo_dir}/{safe_filename}')
+        expected_dir = os.path.abspath(photo_dir)
+        if not final_path.startswith(expected_dir):
+            safe_filename = f'image_{int(time.time())}.jpg'
+            final_path = os.path.abspath(f'{photo_dir}/{safe_filename}')
+        photo_file.download(final_path)
+        external_url = getattr(self.config.WebApp, 'ExternalURL', '')
+        if external_url and 'example.com' not in external_url:
+            long_url = f"{external_url.rstrip('/')}/static/t/{time_stamp}/{safe_filename}"
+            short_url = self.shorten_p(long_url)
+            if message:
+                message += ' '
+            message += f"sent image: {short_url}"
+        else:
+            if message:
+                message += ' '
+            message += 'sent image'
+        self.logger.info(message)
+        return message
 
     async def echo(self, update: Update, _) -> None:  # pylint:disable=too-many-branches,too-many-statements,too-many-locals
         """
@@ -190,29 +220,7 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
             message += f"sent sticker {update.message.sticker.set_name}: {update.message.sticker.emoji}"
 
         if update.message and update.message.photo:
-            photo = sorted(update.message.photo, key=lambda x: x.file_size, reverse=True)[0]
-            photo_file = photo.get_file()
-            original_filename = os.path.basename(urlparse(photo_file.file_path).path)
-            # Sanitize filename to prevent path traversal
-            safe_filename = ''.join(c for c in original_filename if c.isalnum() or c in '._-')
-            if not safe_filename:
-                safe_filename = f'image_{int(time.time())}.jpg'
-            time_stamp = time.strftime('%Y/%m/%d')
-            photo_dir = f'./web/static/t/{time_stamp}'
-            os.makedirs(photo_dir, exist_ok=True)
-            # Ensure the final path is within the expected directory
-            final_path = os.path.abspath(f'{photo_dir}/{safe_filename}')
-            expected_dir = os.path.abspath(photo_dir)
-            if not final_path.startswith(expected_dir):
-                safe_filename = f'image_{int(time.time())}.jpg'
-                final_path = os.path.abspath(f'{photo_dir}/{safe_filename}')
-            photo_file.download(final_path)
-            long_url = f'{self.config.WebApp.ExternalURL}/static/t/{time_stamp}/{safe_filename}'
-            short_url = self.shorten_p(long_url)
-            if message:
-                message += ' '
-            message += f"sent image: {short_url}"
-            self.logger.info(message)
+            message = self._handle_photo(message, update)
 
         # check if we got our message
         if not message:

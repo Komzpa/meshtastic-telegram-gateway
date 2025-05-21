@@ -28,7 +28,7 @@ from mtg.utils import create_fifo, split_message, split_user_message
 from mtg.connection.mqtt import MQTTInterface
 
 
-# pylint:disable=too-many-instance-attributes
+# pylint:disable=too-many-instance-attributes,too-many-public-methods
 class MeshtasticConnection:
     """
     Meshtastic device connection
@@ -109,7 +109,7 @@ class MeshtasticConnection:
     def send_user_text(self, sender: str, message: str, **kwargs) -> None:
         """Send text message from a specific sender with automatic splitting"""
 
-        chunk_len = mesh_pb2.Constants.DATA_PAYLOAD_LEN // 2
+        chunk_len = mesh_pb2.Constants.DATA_PAYLOAD_LEN // 2  # pylint:disable=no-member
         full = f"{sender}: {message}"
         if len(full) <= chunk_len:
             self.send_text(full, **kwargs)
