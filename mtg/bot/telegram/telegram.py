@@ -223,6 +223,7 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
             msg = message.replace(message.split(' ', maxsplit=1)[0], '').strip()
             if self.aprs is not None:
                 self.aprs.send_text(addressee, f'{full_user}: {msg}')
+        self.logger.info("Forwarding to mesh: %s", f"{full_user}: {message}")
         self.meshtastic_connection.send_text(f"{full_user}: {message}")
 
     def shorten_tly(self, long_url: str) -> str:
