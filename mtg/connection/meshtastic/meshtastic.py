@@ -97,6 +97,8 @@ class MeshtasticConnection:
         """
         if self.interface is None:
             return
+        self.logger.debug("Sending to mesh: %s %s", msg, kwargs)
+        self.logger.debug("Sending to mesh: %s %s", msg, kwargs)
         if len(msg) < mesh_pb2.Constants.DATA_PAYLOAD_LEN // 2:  # pylint:disable=no-member
             with self.lock:
                 self.interface.sendText(msg, **kwargs)
