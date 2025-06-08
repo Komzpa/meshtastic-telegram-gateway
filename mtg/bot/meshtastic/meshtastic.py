@@ -101,6 +101,19 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
         """
         self.logger.debug("node info %s on interface %s", node, interface)
 
+    def on_node_updated(self, node, interface: meshtastic_serial_interface.SerialInterface) -> None:
+        """Handle node updates from the radio."""
+        self.logger.debug("node updated %s on interface %s", node, interface)
+        last_heard = node.get("lastHeard", 0)
+        if last_heard < self.meshtastic_connection.get_startup_ts:
+            return
+        node_id = node.get("user", {}).get("id")
+        if node_id is None and node.get("num") is not None:
+            node_id = f"!{int(node['num']):08x}"
+        battery = node.get("deviceMetrics", {}).get("batteryLevel")
+        if node_id:
+            self.notify_low_battery(node_id, battery, interface)
+
     def subscribe(self) -> None:
         """
         Subscribe to Meshtastic events
@@ -111,6 +124,7 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
             "meshtastic.receive": self.on_receive,
             "meshtastic.connection.established": self.on_connection,
             "meshtastic.connection.lost": self.on_connection,
+            "meshtastic.node.updated": self.on_node_updated,
         }
 
         for topic, callback in subscription_map.items():
