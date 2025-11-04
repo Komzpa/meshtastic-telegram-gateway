@@ -5,13 +5,12 @@ import logging
 import re
 import sys
 import time
+import json
 #
 from threading import RLock, Thread
 from typing import (
-    Any,
     Dict,
     List,
-    Optional,
 )
 #
 from meshtastic import (
@@ -19,13 +18,19 @@ from meshtastic import (
     BROADCAST_ADDR as MESHTASTIC_BROADCAST_ADDR,
     serial_interface as meshtastic_serial_interface,
     tcp_interface as meshtastic_tcp_interface,
-    mesh_pb2
+    mesh_pb2,
+    portnums_pb2,
 )
+# pylint:disable=no-name-in-module
 from meshtastic.protobuf import config_pb2
+# pylint:disable=no-name-in-module,no-member
 from setproctitle import setthreadtitle
 
 from mtg.utils import create_fifo, split_message, split_user_message
 from mtg.connection.mqtt import MQTTInterface
+
+FIFO = '/tmp/mtg.fifo'
+FIFO_CMD = '/tmp/mtg.cmd.fifo'
 
 
 # pylint:disable=too-many-instance-attributes,too-many-public-methods
@@ -33,31 +38,18 @@ class MeshtasticConnection:
     """
     Meshtastic device connection
     """
-    fifo = '/tmp/mtg.fifo'
-    fifo_cmd = '/tmp/mtg.cmd.fifo'
+
     # pylint:disable=too-many-arguments,too-many-positional-arguments
-    def __init__(
-        self, dev_path: str, logger: logging.Logger, config: Any, filter_class: Any, startup_ts: float = time.time()
-    ):
+    def __init__(self, dev_path: str, logger: logging.Logger, config, filter_class, startup_ts=time.time()):
         self.dev_path = dev_path
-        self.interface: Optional[Any] = None
+        self.interface = None
         self.logger = logger
         self.config = config
         self.startup_ts = startup_ts
-        self.mqtt_nodes: Dict[str, Any] = {}
+        self.mqtt_nodes = {}
         self.name = 'Meshtastic Connection'
         self.lock = RLock()
-        self.fifo_lock = RLock()  # Add separate lock for FIFO operations
         self.filter = filter_class
-        # Get configurable FIFO paths, use defaults if not set
-        try:
-            self.fifo = getattr(config.Meshtastic, 'FIFOPath', self.fifo)
-        except KeyError:
-            pass
-        try:
-            self.fifo_cmd = getattr(config.Meshtastic, 'FIFOCmdPath', self.fifo_cmd)
-        except KeyError:
-            pass
         # exit
         self.exit = False
 
@@ -70,53 +62,146 @@ class MeshtasticConnection:
         """
         return self.startup_ts
 
-    def connect(self):
-        """
-        Connect to Meshtastic device. Interface can be later updated during reboot procedure
-
-        :return:
-        """
+    def _connect_once(self):
         if self.dev_path.startswith('tcp:'):
-            self.interface = meshtastic_tcp_interface.TCPInterface(self.dev_path.removeprefix('tcp:'),
-                                                                   debugOut=sys.stdout)
+            self.interface = meshtastic_tcp_interface.TCPInterface(
+                self.dev_path.removeprefix('tcp:'), debugOut=sys.stdout
+            )
         elif self.dev_path == 'mqtt':
             self.interface = MQTTInterface(debugOut=sys.stdout, cfg=self.config, logger=self.logger)
-            # start node info thread. BUGGY
-            # Thread(target=self.interface.node_publisher).start()
         else:
-            self.interface = meshtastic_serial_interface.SerialInterface(devPath=self.dev_path, debugOut=sys.stdout)
+            self.interface = meshtastic_serial_interface.SerialInterface(
+                devPath=self.dev_path, debugOut=sys.stdout
+            )
 
-
-    def send_text(self, msg, **kwargs) -> None:
-        """
-        Send Meshtastic message
-
-        :param args:
-        :param kwargs:
-        :return:
-        """
-        if self.interface is None:
-            return
-        self.logger.debug("Sending to mesh: %s %s", msg, kwargs)
-        if len(msg) < mesh_pb2.Constants.DATA_PAYLOAD_LEN // 2:  # pylint:disable=no-member
-            with self.lock:
-                self.interface.sendText(msg, **kwargs)
+    def connect(self):
+        """Connect to Meshtastic device with retries"""
+        retries = 0
+        last_exc = None
+        while retries < 3:
+            try:
+                self._connect_once()
                 return
-        # pylint:disable=no-member
-        split_message(msg, mesh_pb2.Constants.DATA_PAYLOAD_LEN // 2, self.interface.sendText, **kwargs)
-        return
+            except Exception as exc:  # pylint:disable=broad-except
+                last_exc = exc
+                self.logger.error("Meshtastic connect error: %s", repr(exc))
+                if self.interface:
+                    try:
+                        self.interface.close()
+                    except Exception as close_exc:  # pylint:disable=broad-except
+                        self.logger.warning("Failed to close interface: %s", repr(close_exc))
+                    self.interface = None
+                retries += 1
+                time.sleep(5)
+        if last_exc:
+            raise last_exc
 
-    def send_user_text(self, sender: str, message: str, **kwargs) -> None:
-        """Send text message from a specific sender with automatic splitting"""
+
+    def send_text(self, msg, reply_id=None, emoji=None, **kwargs):
+        """Send a Meshtastic message, optionally as a reply or reaction."""
+
+        log_data = {
+            "event": "send_mesh",
+            "message": msg,
+            "kwargs": kwargs,
+            "reply_id": reply_id,
+            "emoji": emoji,
+        }
+        self.logger.info(json.dumps(log_data))
+        chunk_len = mesh_pb2.Constants.DATA_PAYLOAD_LEN // 2  # pylint:disable=no-member
+        send_kwargs = dict(kwargs)
+        results = []
+
+        def _send_single(part, target_reply_id):
+            if target_reply_id is None and emoji is None:
+                packet = self.interface.sendText(part, **send_kwargs)
+            else:
+                packet = self._send_rich_text(
+                    part,
+                    reply_id=target_reply_id,
+                    emoji=emoji,
+                    **send_kwargs,
+                )
+            if packet:
+                results.append(packet)
+            return packet
+
+        if len(msg) <= chunk_len:
+            with self.lock:
+                _send_single(msg, reply_id)
+            return results
+
+        with self.lock:
+            next_reply_id = reply_id
+
+            def _send_part(part, **cb_kwargs):
+                nonlocal next_reply_id
+                cb_kwargs = dict(cb_kwargs)
+                target_reply_id = next_reply_id
+                if target_reply_id is None and results:
+                    target_reply_id = results[-1].id
+                packet = self._send_rich_text(
+                    part,
+                    reply_id=target_reply_id,
+                    emoji=emoji,
+                    **cb_kwargs,
+                ) if (target_reply_id is not None or emoji is not None) else self.interface.sendText(part, **cb_kwargs)
+                if packet:
+                    results.append(packet)
+                    next_reply_id = packet.id
+
+            split_message(msg, chunk_len, _send_part, **send_kwargs)
+        return results
+
+    def _send_rich_text(self, msg, reply_id=None, emoji=None, **kwargs):
+        """Send text that needs extra metadata like reply IDs or emoji reactions."""
+
+        destination_id = kwargs.pop('destinationId', MESHTASTIC_BROADCAST_ADDR)
+        want_ack = kwargs.pop('wantAck', False)
+        hop_limit = kwargs.pop('hopLimit', None)
+        pki_encrypted = kwargs.pop('pkiEncrypted', False)
+        public_key = kwargs.pop('publicKey', None)
+        channel_index = kwargs.pop('channelIndex', 0)
+        want_response = kwargs.pop('wantResponse', False)
+
+        data = mesh_pb2.Data()
+        data.portnum = portnums_pb2.PortNum.TEXT_MESSAGE_APP
+        data.payload = msg.encode('utf-8')
+        data.want_response = want_response
+        if reply_id is not None:
+            data.reply_id = int(reply_id)
+        if emoji is not None:
+            data.emoji = int(emoji)
+
+        mesh_packet = mesh_pb2.MeshPacket()
+        mesh_packet.channel = channel_index
+        mesh_packet.decoded.CopyFrom(data)
+
+        return self.interface._sendPacket(  # pylint:disable=protected-access
+            mesh_packet,
+            destinationId=destination_id,
+            wantAck=want_ack,
+            hopLimit=hop_limit,
+            pkiEncrypted=pki_encrypted,
+            publicKey=public_key,
+        )
+
+    def send_user_text(self, sender: str, message: str, reply_id=None, **kwargs):
+        """Send text message from a specific sender with automatic splitting."""
 
         chunk_len = mesh_pb2.Constants.DATA_PAYLOAD_LEN // 2  # pylint:disable=no-member
         full = f"{sender}: {message}"
         if len(full) <= chunk_len:
-            self.send_text(full, **kwargs)
-            return
+            return self.send_text(full, reply_id=reply_id, **kwargs)
         parts = split_user_message(sender, message, chunk_len)
+        packets = []
+        next_reply_id = reply_id
         for part in parts:
-            self.send_text(part, **kwargs)
+            sent_packets = self.send_text(part, reply_id=next_reply_id, **kwargs)
+            if sent_packets:
+                packets.extend(sent_packets)
+                next_reply_id = sent_packets[-1].id
+        return packets
 
     def send_data(self, *args, **kwargs) -> None:
         """
@@ -126,8 +211,6 @@ class MeshtasticConnection:
         :param kwargs:
         :return:
         """
-        if self.interface is None:
-            return
         with self.lock:
             self.interface.sendData(*args, **kwargs)
 
@@ -138,7 +221,7 @@ class MeshtasticConnection:
         :param node_id:
         :return:
         """
-        return {} if self.interface is None else self.interface.nodes.get(node_id, {})
+        return self.interface.nodes.get(node_id, {})
 
     def reboot(self):
         """
@@ -330,8 +413,6 @@ class MeshtasticConnection:
 
         :return:
         """
-        if self.interface is None:
-            return {}
         return self.interface.nodes or {}
 
     @property
@@ -424,13 +505,12 @@ class MeshtasticConnection:
         setthreadtitle(self.name)
 
         self.logger.debug("Opening FIFO...")
-        create_fifo(self.fifo)
+        create_fifo(FIFO)
         while not self.exit:
-            with self.fifo_lock:  # Prevent race conditions
-                with open(self.fifo, encoding='utf-8') as fifo:
-                    for line in fifo:
-                        line = line.rstrip('\n')
-                        self.send_text(line, destinationId=MESHTASTIC_BROADCAST_ADDR)
+            with open(FIFO, encoding='utf-8') as fifo:
+                for line in fifo:
+                    line = line.rstrip('\n')
+                    self.send_text(line, destinationId=MESHTASTIC_BROADCAST_ADDR)
 
     def run_cmd_loop(self):
         """
@@ -441,18 +521,17 @@ class MeshtasticConnection:
         setthreadtitle("MeshtasticCmd")
 
         self.logger.debug("Opening FIFO...")
-        create_fifo(self.fifo_cmd)
+        create_fifo(FIFO_CMD)
         while not self.exit:
-            with self.fifo_lock:  # Use same lock to prevent race conditions
-                with open(self.fifo_cmd, encoding='utf-8') as fifo:
-                    for line in fifo:
-                        line = line.rstrip('\n')
-                        if line.startswith("reboot"):
-                            self.logger.warning("Reboot requested using CMD...")
-                            self.reboot()
-                        if line.startswith("reset_db"):
-                            self.logger.warning("Reset DB requested using CMD...")
-                            self.reset_db()
+            with open(FIFO_CMD, encoding='utf-8') as fifo:
+                for line in fifo:
+                    line = line.rstrip('\n')
+                    if line.startswith("reboot"):
+                        self.logger.warning("Reboot requested using CMD...")
+                        self.reboot()
+                    if line.startswith("reset_db"):
+                        self.logger.warning("Reset DB requested using CMD...")
+                        self.reset_db()
 
     def shutdown(self):
         """
@@ -466,7 +545,8 @@ class MeshtasticConnection:
 
         :return:
         """
-        thread = Thread(target=self.run_loop, daemon=True, name=self.name)
-        thread.start()
-        cmd_thread = Thread(target=self.run_cmd_loop, daemon=True, name="MeshtasticCmd")
-        cmd_thread.start()
+        if self.config.enforce_type(bool, self.config.Meshtastic.FIFOEnabled):
+            thread = Thread(target=self.run_loop, daemon=True, name=self.name)
+            thread.start()
+            cmd_thread = Thread(target=self.run_cmd_loop, daemon=True, name="MeshtasticCmd")
+            cmd_thread.start()
