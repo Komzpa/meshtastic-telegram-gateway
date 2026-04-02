@@ -604,6 +604,9 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
         if hop_limit > self.config.enforce_type(int, self.config.Meshtastic.MaxHopCount):
             self.logger.debug(f"User {from_id} exceeds {hop_limit}...")
             return
+        if decoded is None:
+            self.logger.debug("Packet from %s has no decoded payload", from_id)
+            return
         #
         if decoded.get('portnum') != 'TEXT_MESSAGE_APP':
             if self._process_rangetest(packet, decoded, from_id, to_id, interface):
