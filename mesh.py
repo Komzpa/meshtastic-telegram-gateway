@@ -150,10 +150,19 @@ def main(args):
     else:
         logger.info('APRS disabled by configuration; streamer not started')
     # FIFO watcher
-    meshtastic_connection.run()
-    web_server.run()
+    if config.enforce_type(bool, config.Meshtastic.FIFOEnabled):
+        meshtastic_connection.run()
+    else:
+        logger.info('Meshtastic FIFO disabled by configuration; watcher not started')
+    if config.enforce_type(bool, config.WebApp.Enabled):
+        web_server.run()
+    else:
+        logger.info('Web app disabled by configuration; server not started')
     telegram_bot.run()
-    mqtt_connection.run()
+    if config.enforce_type(bool, config.MQTT.Enabled):
+        mqtt_connection.run()
+    else:
+        logger.info('MQTT disabled by configuration; connection not started')
     external_plugins.run()
     # blocking
     while True:
