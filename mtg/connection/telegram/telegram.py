@@ -4,8 +4,10 @@
 import asyncio
 import logging
 import queue
+from types import SimpleNamespace
 from typing import Any, Optional
 
+import requests
 from telegram import ReactionTypeEmoji, Update
 from telegram.error import NetworkError, TelegramError
 from telegram.ext import Application
@@ -16,6 +18,7 @@ class TelegramConnection:
 
     def __init__(self, token: str, logger: logging.Logger):
         self.logger = logger
+        self.token = token
         self.msg_queue: Optional[asyncio.Queue[tuple[tuple[Any, ...], dict[str, Any]]]] = None
         self.q: queue.Queue[tuple[tuple[Any, ...], dict[str, Any]]] = queue.Queue()
         self.queue_task: Optional[asyncio.Task[Any]] = None
@@ -38,16 +41,32 @@ class TelegramConnection:
     def send_message(self, *args: Any, **kwargs: Any) -> None:
         """Send a Telegram message from a synchronous context."""
 
-        if self.loop is None or self.loop.is_closed():
-            self.logger.warning("Application loop not initialized yet, message will be dropped")
+        payload = dict(kwargs)
+        if args:
+            if len(args) > 0:
+                payload.setdefault('chat_id', args[0])
+            if len(args) > 1:
+                payload.setdefault('text', args[1])
+        if 'chat_id' not in payload or 'text' not in payload:
+            self.logger.error("Telegram message requires chat_id and text, got %s", payload)
             return None
-        future = asyncio.run_coroutine_threadsafe(
-            self.application.bot.send_message(*args, **kwargs),
-            self.loop,
-        )
         try:
-            return future.result(timeout=30)
-        except Exception as exc:  # pylint:disable=broad-except
+            response = requests.post(
+                f"https://api.telegram.org/bot{self.token}/sendMessage",
+                json=payload,
+                timeout=15,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if not data.get('ok'):
+                self.logger.error("Telegram API sendMessage failed: %s", data)
+                return None
+            result = data.get('result', {})
+            return SimpleNamespace(
+                message_id=result.get('message_id'),
+                raw=result,
+            )
+        except (requests.RequestException, ValueError) as exc:
             self.logger.error("Failed to send Telegram message: %s", repr(exc))
             return None
 

@@ -1,5 +1,4 @@
 import asyncio
-import concurrent.futures
 import sys
 from unittest.mock import MagicMock, patch, AsyncMock
 
@@ -54,45 +53,45 @@ class TestTelegramConnection:
                 mock_get_logger.assert_called_once_with("httpx")
                 mock_logger_httpx.setLevel.assert_called_once_with(30)  # logging.WARNING = 30
 
-    @pytest.mark.asyncio
-    async def test_send_message(self, telegram_connection):
+    def test_send_message(self, telegram_connection):
         """Test send_message method"""
-        telegram_connection.application.bot = AsyncMock()
-        telegram_connection.loop = MagicMock()
-        telegram_connection.loop.is_closed.return_value = False
-        future = concurrent.futures.Future()
-        future.set_result(MagicMock())
+        mock_response = MagicMock()
+        mock_response.json.return_value = {'ok': True, 'result': {'message_id': 55}}
 
-        with patch('asyncio.run_coroutine_threadsafe') as mock_run_threadsafe:
-            mock_run_threadsafe.return_value = future
-            telegram_connection.send_message(chat_id=12345, text="Test message")
+        with patch('mtg.connection.telegram.telegram.requests.post') as mock_post:
+            mock_post.return_value = mock_response
+            result = telegram_connection.send_message(chat_id=12345, text="Test message")
 
-            mock_run_threadsafe.assert_called_once()
-            coro = mock_run_threadsafe.call_args[0][0]
-            assert asyncio.iscoroutine(coro)
-            coro.close()
+        mock_post.assert_called_once_with(
+            'https://api.telegram.org/bottest_token/sendMessage',
+            json={'chat_id': 12345, 'text': 'Test message'},
+            timeout=15,
+        )
+        assert result.message_id == 55
 
-    @pytest.mark.asyncio
-    async def test_send_message_with_args_and_kwargs(self, telegram_connection):
+    def test_send_message_with_args_and_kwargs(self, telegram_connection):
         """Test send_message method with various args and kwargs"""
-        telegram_connection.application.bot = AsyncMock()
-        telegram_connection.loop = MagicMock()
-        telegram_connection.loop.is_closed.return_value = False
-        future = concurrent.futures.Future()
-        future.set_result(MagicMock())
+        mock_response = MagicMock()
+        mock_response.json.return_value = {'ok': True, 'result': {'message_id': 89}}
 
-        with patch('asyncio.run_coroutine_threadsafe') as mock_run_threadsafe:
-            mock_run_threadsafe.return_value = future
-            telegram_connection.send_message(
+        with patch('mtg.connection.telegram.telegram.requests.post') as mock_post:
+            result = telegram_connection.send_message(
                 12345, "Test message",
                 parse_mode="HTML",
                 reply_to_message_id=67890
             )
 
-            mock_run_threadsafe.assert_called_once()
-            coro = mock_run_threadsafe.call_args[0][0]
-            assert asyncio.iscoroutine(coro)
-            coro.close()
+        mock_post.assert_called_once_with(
+            'https://api.telegram.org/bottest_token/sendMessage',
+            json={
+                'chat_id': 12345,
+                'text': 'Test message',
+                'parse_mode': 'HTML',
+                'reply_to_message_id': 67890,
+            },
+            timeout=15,
+        )
+        assert result.message_id == 89
 
     def test_poll(self, telegram_connection):
         """Test poll method"""
@@ -143,22 +142,9 @@ class TestTelegramConnection:
             mock_token_builder.job_queue.assert_called_once_with(None)
             mock_token_builder.build.assert_called_once()
 
-    @pytest.mark.asyncio
-    async def test_actual_send_message_call(self, telegram_connection):
-        """Test that send_message actually calls the bot's send_message method"""
-        mock_bot = AsyncMock()
-        telegram_connection.application.bot = mock_bot
-
-        # We need to actually run the coroutine to test it properly
-        await telegram_connection.application.bot.send_message(
-            chat_id=12345,
-            text="Test message"
-        )
-
-        mock_bot.send_message.assert_called_once_with(
-            chat_id=12345,
-            text="Test message"
-        )
+    def test_send_message_requires_chat_id_and_text(self, telegram_connection):
+        """Test that send_message validates required payload fields."""
+        assert telegram_connection.send_message(parse_mode="HTML") is None
 
     def test_logger_assignment(self, telegram_connection, mock_logger):
         """Test that logger is properly assigned"""
