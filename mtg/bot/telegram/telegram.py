@@ -2,14 +2,15 @@
 """ Telegram bot module """
 
 import functools
+import inspect
 import logging
 import json
 import os
-import pkg_resources
 import re
 import tempfile
 import time
 from datetime import timedelta
+from importlib.metadata import version as importlib_version
 from typing import Optional, Tuple
 #
 from threading import Thread
@@ -18,13 +19,9 @@ from urllib.parse import urlparse
 import humanize
 import pyqrcode
 import requests
-# pylint:disable=no-name-in-module
-from setproctitle import setthreadtitle
 from telegram import Update
-from telegram.constants import MAX_MESSAGE_LENGTH
-from telegram.ext import CallbackContext
-from telegram.ext import CommandHandler
-from telegram.ext import MessageHandler, Filters
+from telegram.constants import MessageLimit
+from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
 #
 from mtg.config import Config
 from mtg.connection.rich import RichConnection
@@ -47,7 +44,7 @@ def check_room(func):
     """
 
     @functools.wraps(func)
-    def wrapper(*args):
+    async def wrapper(*args):
         """
         wrapper - decorator wrapper functions
         """
@@ -66,7 +63,7 @@ def check_room(func):
         if bot.filter and update.effective_user and bot.filter.banned(str(update.effective_user.id)):
             bot.logger.debug(f"User {update.effective_user.id} is in a blacklist...")
             return None
-        return func(*args)
+        return await func(*args)
 
     return wrapper
 
@@ -103,28 +100,27 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
         routes_handler = CommandHandler('routes', self.routes)
 
 
-        dispatcher = self.telegram_connection.dispatcher
+        application = self.telegram_connection.application
 
-        dispatcher.add_handler(start_handler)
-        dispatcher.add_handler(node_handler)
-        dispatcher.add_handler(reboot_handler)
-        dispatcher.add_handler(qr_handler)
-        dispatcher.add_handler(ch_handler)
-        dispatcher.add_handler(uptime_handler)
-        dispatcher.add_handler(maplink_handler)
-        dispatcher.add_handler(resetdb_handler)
-        dispatcher.add_handler(traceroute_handler)
-        dispatcher.add_handler(routes_handler)
+        application.add_handler(start_handler)
+        application.add_handler(node_handler)
+        application.add_handler(reboot_handler)
+        application.add_handler(qr_handler)
+        application.add_handler(ch_handler)
+        application.add_handler(uptime_handler)
+        application.add_handler(maplink_handler)
+        application.add_handler(resetdb_handler)
+        application.add_handler(traceroute_handler)
+        application.add_handler(routes_handler)
 
-
-        log_handler = MessageHandler(Filters.all, self.log_update)
-        dispatcher.add_handler(log_handler, group=0)
+        log_handler = MessageHandler(filters.ALL, self.log_update)
+        application.add_handler(log_handler, group=0)
 
         reaction_handler = MessageReactionHandler(self.handle_reaction)
-        dispatcher.add_handler(reaction_handler, group=1)
+        application.add_handler(reaction_handler, group=1)
 
-        echo_handler = MessageHandler(~Filters.command, self.echo)
-        dispatcher.add_handler(echo_handler, group=1)
+        echo_handler = MessageHandler(~filters.COMMAND, self.echo)
+        application.add_handler(echo_handler, group=1)
 
         self._refresh_cached_config()
 
@@ -299,7 +295,15 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
             )
         return database.get_link_by_telegram(update.effective_chat.id, reply_to.message_id)
 
-    def log_update(self, update: Update, _context: CallbackContext) -> None:
+    @staticmethod
+    async def _maybe_await(result):
+        """Await coroutine-like results and return plain values unchanged."""
+
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    async def log_update(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         """Log every incoming Telegram update"""
         msg = update.effective_message
         data = {
@@ -335,15 +339,15 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
             splits[pos] = replacements.get(pos)
         return ' '.join([x for x in splits if x])
 
-    def _handle_photo(self, message: str, update: Update) -> str:
+    async def _handle_photo(self, message: str, update: Update) -> str:
         """Save photo attachment and return updated message"""
         photo = sorted(update.message.photo, key=lambda x: x.file_size, reverse=True)[0]
-        photo_file = photo.get_file()
+        photo_file = await self._maybe_await(photo.get_file())
         file_path = os.path.basename(urlparse(photo_file.file_path).path)
         time_stamp = time.strftime('%Y/%m/%d')
         photo_dir = f'./web/static/t/{time_stamp}'
         os.makedirs(photo_dir, exist_ok=True)
-        photo_file.download(f'{photo_dir}/{file_path}')
+        await self._maybe_await(photo_file.download_to_drive(f'{photo_dir}/{file_path}'))
         external_url = getattr(self.config.WebApp, 'ExternalURL', '')
         # Skip generating URL if configuration still uses placeholder domain
         if external_url and 'example.com' not in external_url:
@@ -359,7 +363,7 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
         self.logger.info(message)
         return message
 
-    def echo(self, update: Update, _) -> None:  # pylint:disable=too-many-branches
+    async def echo(self, update: Update, _) -> None:  # pylint:disable=too-many-branches
         """
         Telegram bot echo handler. Does actual message forwarding
 
@@ -410,7 +414,7 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
             message += f"sent sticker {update.message.sticker.set_name}: {update.message.sticker.emoji}"
 
         if update.message and update.message.photo:
-            message = self._handle_photo(message, update)
+            message = await self._handle_photo(message, update)
 
         # check if we got our message
         if not message:
@@ -562,7 +566,7 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
             )
             previous_packet_id = packet.id
 
-    def handle_reaction(self, update: Update, _context: CallbackContext) -> None:  # pylint:disable=too-many-branches
+    async def handle_reaction(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:  # pylint:disable=too-many-branches
         """Forward Telegram emoji reactions to Meshtastic."""
 
         reaction = getattr(update, 'message_reaction', None)
@@ -591,7 +595,7 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
             self.logger.debug(f"User {user.id} is in a blacklist...")
             return
 
-        bot_user_id = getattr(self.telegram_connection.updater.bot, 'id', None)
+        bot_user_id = getattr(self.telegram_connection.bot, 'id', None)
         if user and getattr(user, 'is_bot', False):
             if bot_user_id == user.id:
                 self.logger.debug('Ignoring reaction generated by the bridge bot user %s', user.id)
@@ -728,11 +732,10 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
 
         :return:
         """
-        setthreadtitle(self.name)
         self.telegram_connection.poll()
 
     @check_room
-    def start(self, update: Update, context: CallbackContext) -> None:
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         Telegram /start command handler.
 
@@ -742,10 +745,10 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
         """
         chat_id = update.effective_chat.id
         self.logger.info(f"Got /start from {chat_id}")
-        context.bot.send_message(chat_id=chat_id, text="I'm a bot, please talk to me!")
+        await context.bot.send_message(chat_id=chat_id, text="I'm a bot, please talk to me!")
 
     @check_room
-    def reboot(self, update: Update, context: CallbackContext) -> None:
+    async def reboot(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         Telegram reboot command
 
@@ -759,11 +762,11 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
         if update.effective_chat.id != self._admin_id:
             self.logger.info("Reboot requested by non-admin: %d", update.effective_chat.id)
             return
-        context.bot.send_message(chat_id=update.effective_chat.id, text="Requesting reboot...")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Requesting reboot...")
         self.meshtastic_connection.reboot()
 
     @check_room
-    def reset_db(self, update: Update, context: CallbackContext) -> None:
+    async def reset_db(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         Telegram reset node DB command
 
@@ -777,11 +780,11 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
         if update.effective_chat.id != self._admin_id:
             self.logger.info("Reset node DB requested by non-admin: %d", update.effective_chat.id)
             return
-        context.bot.send_message(chat_id=update.effective_chat.id, text="Requesting node DB reset...")
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Requesting node DB reset...")
         self.meshtastic_connection.reset_db()
 
     @check_room
-    def traceroute(self, update: Update, context: CallbackContext) -> None:
+    async def traceroute(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         Telegram traceroute command
 
@@ -795,15 +798,15 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
         if update.effective_chat.id != self._admin_id:
             self.logger.info("Traceroute requested by non-admin: %d", update.effective_chat.id)
             return
-        context.bot.send_message(chat_id=update.effective_chat.id, text="Sending traceroute... See bot logs")
         lora_config = getattr(self.meshtastic_connection.interface.localNode.localConfig, 'lora')
         hop_limit = getattr(lora_config, 'hop_limit')
         dest = update.message.text.lstrip('/traceroute ')
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Sending traceroute... See bot logs")
         self.logger.info(f"Sending traceroute request to {dest} (this could take a while)")
         self.bg_route(dest, hop_limit)
 
     @check_room
-    def routes(self, update: Update, _context: CallbackContext) -> None:
+    async def routes(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         Telegram routes command
 
@@ -824,7 +827,7 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
                 self.bg_route(node_id, hop_limit)
 
     @check_room
-    def qr_code(self, update: Update, context: CallbackContext) -> None:
+    async def qr_code(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         qr - Return image containing current channel QR
 
@@ -838,11 +841,11 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
         _, tmp = tempfile.mkstemp()
         qr_url.png(tmp, scale=5)
         with open(tmp, 'rb') as photo_handle:
-            context.bot.send_photo(chat_id=update.effective_chat.id, photo=photo_handle)
+            await context.bot.send_photo(chat_id=update.effective_chat.id, photo=photo_handle)
             os.remove(tmp)
 
     @check_room
-    def channel_url(self, update: Update, context: CallbackContext) -> None:
+    async def channel_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         channel_url - Return current channel URL
 
@@ -852,10 +855,10 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
         """
         url = self.meshtastic_connection.interface.localNode.getURL(includeAll=False)
         self.logger.debug(f"Primary channel URL {url}")
-        context.bot.send_message(chat_id=update.effective_chat.id, text=url)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=url)
 
     @check_room
-    def uptime(self, update: Update, context: CallbackContext) -> None:
+    async def uptime(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         uptime - Return bot uptime
 
@@ -868,14 +871,14 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
         if self.meshtastic_connection.interface.myInfo and self.meshtastic_connection.interface.metadata:
             firmware = self.meshtastic_connection.interface.metadata.firmware_version
             reboot_count = self.meshtastic_connection.interface.myInfo.reboot_count
-        the_version = pkg_resources.get_distribution("meshtastic").version
+        the_version = importlib_version("meshtastic")
         formatted_time = humanize.naturaltime(time.time() - self.meshtastic_connection.get_startup_ts)
         text = f'Bot v{VERSION}/FW: v{firmware}/Meshlib: v{the_version}/Reboots: {reboot_count}.'
         text += f'Started {formatted_time}'
-        context.bot.send_message(chat_id=update.effective_chat.id, text=text)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=text)
 
     @check_room
-    def map_link(self, update: Update, context: CallbackContext) -> None:
+    async def map_link(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         Returns map link to user
 
@@ -886,11 +889,10 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
         msg = 'Map link not enabled'
         if self._get_telegram_bool('MapLinkEnabled', default=False):
             msg = self.config.enforce_type(str, self.config.Telegram.MapLink)
-        context.bot.send_message(chat_id=update.effective_chat.id,
-                                 text=msg)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
 
     @check_room
-    def nodes(self, update: Update, context: CallbackContext) -> None:
+    async def nodes(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         Returns list of nodes to user
 
@@ -901,16 +903,21 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
         include_self = self._get_telegram_bool('NodeIncludeSelf', default=False)
         formatted = self.meshtastic_connection.format_nodes(include_self=include_self)
 
-        if len(formatted) < MAX_MESSAGE_LENGTH:
-            context.bot.send_message(chat_id=update.effective_chat.id,
-                                     text=formatted,
-                                     parse_mode='MarkdownV2')
+        if len(formatted) < MessageLimit.MAX_TEXT_LENGTH:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=formatted,
+                parse_mode='MarkdownV2',
+            )
             return
-        split_message(formatted, MAX_MESSAGE_LENGTH,
-                      lambda msg: context.bot.send_message(chat_id=update.effective_chat.id,
-                                                           text=msg,
-                                                           parse_mode='MarkdownV2')
-                      )
+        parts = []
+        split_message(formatted, MessageLimit.MAX_TEXT_LENGTH, parts.append)
+        for message_part in parts:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=message_part,
+                parse_mode='MarkdownV2',
+            )
 
     def bg_route(self, dest, hop_limit):
         """

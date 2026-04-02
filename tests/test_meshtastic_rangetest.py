@@ -24,13 +24,14 @@ def build_bot():
     bot.database.get_node_record.return_value = (False, None)
     bot.config = SimpleNamespace(
         enforce_type=lambda _type, value: _type(value),
-        Telegram=SimpleNamespace(NotificationsEnabled='false'),
-        Meshtastic=SimpleNamespace(MaxHopCount='7'),
+        Telegram=SimpleNamespace(NotificationsEnabled=False, Room=12345),
+        Meshtastic=SimpleNamespace(MaxHopCount=7),
     )
     bot.filter = MagicMock()
     bot.filter.banned.return_value = False
     bot.logger = logging.getLogger('test-meshtastic-rangetest')
     bot.telegram_connection = MagicMock()
+    bot.telegram_connection.send_message_sync = MagicMock()
     bot.meshtastic_connection = MagicMock()
     bot.bot_handler = MagicMock()
     bot.bot_handler.get_response.return_value = None
@@ -70,12 +71,24 @@ def test_broadcast_rangetest_app_sends_direct_nag():
     bot = build_bot()
     interface = build_interface()
     packet = build_packet(portnum='RANGE_TEST_APP', text='seq 1')
+    bot._is_broadcast_target = lambda _target: True  # pylint:disable=protected-access
 
-    bot.on_receive(packet, interface)
+    handled = bot._process_rangetest(  # pylint:disable=protected-access
+        packet,
+        packet['decoded'],
+        packet['fromId'],
+        packet['toId'],
+        interface,
+    )
 
+    assert handled is True
     bot.meshtastic_connection.send_text.assert_called_once_with(
         "Got your rangetest packet (seq 1). Please remember to turn rangetest off when you're done.",
         destinationId='!12345678',
+    )
+    bot.telegram_connection.send_message_sync.assert_called_once_with(
+        chat_id=12345,
+        text='Range Tester: seq 1 [rangetest]',
     )
     bot.telegram_connection.send_message.assert_not_called()
 
@@ -83,21 +96,28 @@ def test_broadcast_rangetest_app_sends_direct_nag():
 def test_each_broadcast_rangetest_packet_triggers_a_nag():
     bot = build_bot()
     interface = build_interface()
+    bot._is_broadcast_target = lambda _target: True  # pylint:disable=protected-access
 
-    bot.on_receive(build_packet(portnum='RANGE_TEST_APP', text='seq 1'), interface)
-    bot.on_receive(build_packet(portnum='RANGE_TEST_APP', text='seq 2'), interface)
+    packet1 = build_packet(portnum='RANGE_TEST_APP', text='seq 1')
+    packet2 = build_packet(portnum='RANGE_TEST_APP', text='seq 2')
+
+    bot._process_rangetest(packet1, packet1['decoded'], packet1['fromId'], packet1['toId'], interface)  # pylint:disable=protected-access
+    bot._process_rangetest(packet2, packet2['decoded'], packet2['fromId'], packet2['toId'], interface)  # pylint:disable=protected-access
 
     assert bot.meshtastic_connection.send_text.call_count == 2
+    assert bot.telegram_connection.send_message_sync.call_count == 2
 
 
 def test_non_broadcast_rangetest_is_ignored_for_dm():
     bot = build_bot()
     interface = build_interface()
     packet = build_packet(portnum='RANGE_TEST_APP', text='seq 3', to_id='!abcdef01')
+    bot._is_broadcast_target = lambda _target: False  # pylint:disable=protected-access
 
     bot.on_receive(packet, interface)
 
     bot.meshtastic_connection.send_text.assert_not_called()
+    bot.telegram_connection.send_message_sync.assert_not_called()
     bot.telegram_connection.send_message.assert_not_called()
 
 
@@ -105,10 +125,12 @@ def test_non_seq_rangetest_payload_does_not_nag():
     bot = build_bot()
     interface = build_interface()
     packet = build_packet(portnum='RANGE_TEST_APP', text='hello there')
+    bot._is_broadcast_target = lambda _target: True  # pylint:disable=protected-access
 
     bot.on_receive(packet, interface)
 
     bot.meshtastic_connection.send_text.assert_not_called()
+    bot.telegram_connection.send_message_sync.assert_not_called()
     bot.telegram_connection.send_message.assert_not_called()
 
 
@@ -116,11 +138,23 @@ def test_text_message_seq_fallback_still_sends_direct_nag():
     bot = build_bot()
     interface = build_interface()
     packet = build_packet(portnum='TEXT_MESSAGE_APP', text='seq 9')
+    bot._is_broadcast_target = lambda _target: True  # pylint:disable=protected-access
 
-    bot.on_receive(packet, interface)
+    handled = bot._process_rangetest(  # pylint:disable=protected-access
+        packet,
+        packet['decoded'],
+        packet['fromId'],
+        packet['toId'],
+        interface,
+    )
 
+    assert handled is True
     bot.meshtastic_connection.send_text.assert_called_once_with(
         "Got your rangetest packet (seq 9). Please remember to turn rangetest off when you're done.",
         destinationId='!12345678',
+    )
+    bot.telegram_connection.send_message_sync.assert_called_once_with(
+        chat_id=12345,
+        text='Range Tester: seq 9 [rangetest]',
     )
     bot.telegram_connection.send_message.assert_not_called()

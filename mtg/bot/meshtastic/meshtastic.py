@@ -43,7 +43,7 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
         self.database = database
         self.config = config
         self.filter = None
-        self.logger = None
+        self.logger = logging.getLogger('Meshtastic Bot')
         self.telegram_connection = telegram_connection
         self.meshtastic_connection = meshtastic_connection
         # track ping request/reply
@@ -447,9 +447,10 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
         msg = f"{from_id} -> {long_name}"
         if self.config.enforce_type(bool, self.config.Meshtastic.WelcomeMessageEnabled):
             self.meshtastic_connection.send_text(self.config.Meshtastic.WelcomeMessage, destinationId=from_id)
-        self.telegram_connection.send_message(chat_id=self.config.enforce_type(int,
-                                                                               self.config.Telegram.NotificationsRoom),
-                                              text=f"New node: {msg}")
+        self.telegram_connection.send_message_sync(
+            chat_id=self.config.enforce_type(int, self.config.Telegram.NotificationsRoom),
+            text=f"New node: {msg}",
+        )
 
     def _battery_emoji(self, level: int) -> str:
         """Return an emoji representing battery state."""
@@ -493,7 +494,7 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
             if found:
                 node_name = record.nodeName
         emoji = self._battery_emoji(battery)
-        self.telegram_connection.send_message(
+        self.telegram_connection.send_message_sync(
             chat_id=self.config.enforce_type(int, self.config.Telegram.Room),
             text=f"Battery {emoji} {battery}% for {node_name}",
         )
@@ -511,6 +512,18 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
         if found:
             return record.nodeName
         return from_id
+
+    @staticmethod
+    def _is_broadcast_target(target) -> bool:
+        """Return True when the provided Meshtastic target represents broadcast."""
+
+        normalized = str(target)
+        return normalized in {
+            str(MESHTASTIC_BROADCAST_ADDR),
+            '^all',
+            '4294967295',
+            '0xffffffff',
+        }
 
     def _process_rangetest(
         self,
@@ -533,7 +546,7 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
         node_name = self._resolve_node_name(from_id, interface)
         self.logger.debug("User %s has sent range test packet: %s", node_name, msg)
 
-        if to_id != MESHTASTIC_BROADCAST_ADDR:
+        if not self._is_broadcast_target(to_id):
             return True
 
         reply = f"Got your rangetest packet ({msg}). Please remember to turn rangetest off when you're done."
@@ -545,6 +558,19 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
                 self.logger.info("Sent rangetest nag to %s (%s): %s", node_name, from_id, msg)
         except Exception as exc:  # pylint:disable=broad-except
             self.logger.error("Failed to send rangetest nag to %s (%s): %s", node_name, from_id, repr(exc))
+
+        try:
+            self.telegram_connection.send_message_sync(
+                chat_id=self.config.enforce_type(int, self.config.Telegram.Room),
+                text=f"{node_name}: {msg} [rangetest]",
+            )
+        except Exception as exc:  # pylint:disable=broad-except
+            self.logger.error(
+                "Failed to forward rangetest packet from %s (%s) to Telegram: %s",
+                node_name,
+                from_id,
+                repr(exc),
+            )
         return True
 
     # pylint:disable=too-many-branches, too-many-statements, too-many-return-statements
@@ -567,7 +593,7 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
             from_id = f"!{from_id:>08}"
             packet['fromId'] = from_id
         # check for blacklist
-        if self.filter.banned(from_id):
+        if self.filter and self.filter.banned(from_id):
             self.logger.debug(f"User {from_id} is in a blacklist...")
             return
         # Send notifications if they're enabled
@@ -612,7 +638,7 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
             return
 
         # ignore non-broadcast messages
-        if to_id != MESHTASTIC_BROADCAST_ADDR:
+        if not self._is_broadcast_target(to_id):
             if msg.startswith('/'):
                 self.process_meshtastic_command(packet, interface)
                 return
@@ -731,11 +757,13 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
             new_msg = msg.replace(msg.split(' ')[0], '').strip()
             self.aprs.send_text(addressee, f'{long_name}: {new_msg}')
 
-        message = self.telegram_connection.send_message(
-            chat_id=self.config.enforce_type(int, self.config.Telegram.Room),
-            text=f"{long_name}: {msg}",
-            reply_to_message_id=reply_message_id,
-        )
+        send_kwargs = {
+            'chat_id': self.config.enforce_type(int, self.config.Telegram.Room),
+            'text': f"{long_name}: {msg}",
+        }
+        if reply_message_id is not None:
+            send_kwargs['reply_to_message_id'] = reply_message_id
+        message = self.telegram_connection.send_message_sync(**send_kwargs)
         if message:
             self.database.mark_link_sent(record.id, telegram_message_id=message.message_id)
         else:

@@ -380,6 +380,8 @@ class MeshtasticDB:
         :return:
         """
         node_record = MeshtasticNodeRecord.select(lambda n: n.nodeId == node_id).first()
+        if self.connection is None:
+            return False, None
         node_info = self.connection.node_info(node_id)
         last_heard = datetime.fromtimestamp(node_info.get('lastHeard', 0))
         node_name = node_info.get('user', {}).get('longName', '')
@@ -600,22 +602,20 @@ class MeshtasticDB:
         """Find the most recent link matching payload (and optionally sender)."""
 
         cutoff = datetime.utcnow() - max_age
-        if sender is not None:
-            query = select(
-                link for link in MessageLinkRecord
-                if link.direction == direction
-                and link.sender == sender
-                and link.payload == payload
-                and link.created_at >= cutoff
-            )
-        else:
-            query = select(
-                link for link in MessageLinkRecord
-                if link.direction == direction
-                and link.payload == payload
-                and link.created_at >= cutoff
-            )
-        return query.order_by(lambda link: desc(link.created_at)).first()
+        candidates = []
+        for link in MessageLinkRecord.select():
+            if link.direction != direction:
+                continue
+            if link.payload != payload:
+                continue
+            if sender is not None and link.sender != sender:
+                continue
+            if link.created_at < cutoff:
+                continue
+            candidates.append(link)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda link: link.created_at)
 
     @staticmethod
     @db_session
@@ -742,10 +742,12 @@ class MeshtasticDB:
             node_record = MeshtasticNodeRecord.select(lambda n: n.nodeName == node_name).first()
         if not node_record:
             return data
-        # pylint:disable=unnecessary-lambda-assignment
-        cnd = lambda n: n.node == node_record and n.datetime >= datetime.now() - timedelta(seconds=tail)
-        record = MeshtasticLocationRecord.select(cnd)
-        location_record = record.order_by(desc(MeshtasticLocationRecord.datetime))
+        cutoff = datetime.now() - timedelta(seconds=tail)
+        location_record = (
+            MeshtasticLocationRecord.select()
+            .where(lambda n: n.node == node_record and n.datetime >= cutoff)
+            .order_by(desc(MeshtasticLocationRecord.datetime))
+        )
         data.extend(
             {"lat": l_r.latitude, "lng": l_r.longitude} for l_r in location_record
         )

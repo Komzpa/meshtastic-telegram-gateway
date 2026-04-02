@@ -9,8 +9,10 @@ import json
 #
 from threading import RLock, Thread
 from typing import (
+    Any,
     Dict,
     List,
+    Optional,
 )
 #
 from meshtastic import (
@@ -38,18 +40,33 @@ class MeshtasticConnection:
     """
     Meshtastic device connection
     """
+    fifo = FIFO
+    fifo_cmd = FIFO_CMD
 
     # pylint:disable=too-many-arguments,too-many-positional-arguments
-    def __init__(self, dev_path: str, logger: logging.Logger, config, filter_class, startup_ts=time.time()):
+    def __init__(
+        self,
+        dev_path: str,
+        logger: logging.Logger,
+        config: Any,
+        filter_class: Any,
+        startup_ts: float = time.time(),
+    ):
         self.dev_path = dev_path
-        self.interface = None
+        self.interface: Optional[Any] = None
         self.logger = logger
         self.config = config
         self.startup_ts = startup_ts
-        self.mqtt_nodes = {}
+        self.mqtt_nodes: Dict[str, Any] = {}
         self.name = 'Meshtastic Connection'
         self.lock = RLock()
+        self.fifo_lock = RLock()
         self.filter = filter_class
+        parser = getattr(config, 'config', None)
+        if parser is not None and parser.has_section('Meshtastic'):
+            meshtastic_config = parser['Meshtastic']
+            self.fifo = meshtastic_config.get('FIFOPath', self.fifo)
+            self.fifo_cmd = meshtastic_config.get('FIFOCmdPath', self.fifo_cmd)
         # exit
         self.exit = False
 
@@ -99,6 +116,8 @@ class MeshtasticConnection:
 
     def send_text(self, msg, reply_id=None, emoji=None, **kwargs):
         """Send a Meshtastic message, optionally as a reply or reaction."""
+        if self.interface is None:
+            return []
 
         log_data = {
             "event": "send_mesh",
@@ -129,6 +148,11 @@ class MeshtasticConnection:
         if len(msg) <= chunk_len:
             with self.lock:
                 _send_single(msg, reply_id)
+            return results
+
+        if reply_id is None and emoji is None:
+            with self.lock:
+                split_message(msg, chunk_len, self.interface.sendText, **send_kwargs)
             return results
 
         with self.lock:
@@ -211,6 +235,8 @@ class MeshtasticConnection:
         :param kwargs:
         :return:
         """
+        if self.interface is None:
+            return
         with self.lock:
             self.interface.sendData(*args, **kwargs)
 
@@ -221,6 +247,8 @@ class MeshtasticConnection:
         :param node_id:
         :return:
         """
+        if self.interface is None:
+            return {}
         return self.interface.nodes.get(node_id, {})
 
     def reboot(self):
@@ -252,9 +280,21 @@ class MeshtasticConnection:
 
         The device reboots after configuration is applied, which is expected.
         """
-        if not self.config.enforce_type(
-            bool, getattr(self.config.MeshtasticReset, 'Enabled', 'false')
-        ):
+        parser = getattr(self.config, 'config', None)
+        reset_cfg = None
+        telegram_cfg = None
+        if parser is not None:
+            if parser.has_section('MeshtasticReset'):
+                reset_cfg = parser['MeshtasticReset']
+            if parser.has_section('Telegram'):
+                telegram_cfg = parser['Telegram']
+
+        def _reset_value(name, default=None):
+            if reset_cfg is None:
+                return default
+            return reset_cfg.get(name, default)
+
+        if not self.config.enforce_type(bool, _reset_value('Enabled', 'false')):
             return
         try:
             self.interface.waitForConfig()
@@ -267,14 +307,14 @@ class MeshtasticConnection:
 
         use_room = self.config.enforce_type(
             bool,
-            getattr(self.config.MeshtasticReset, 'LongNameFromRoomLink', 'true'),
+            _reset_value('LongNameFromRoomLink', 'true'),
         )
         desired_long = (
-            self.config.Telegram.RoomLink
+            telegram_cfg.get('RoomLink') if telegram_cfg is not None else None
             if use_room
-            else getattr(self.config.MeshtasticReset, 'LongName', None)
+            else _reset_value('LongName', None)
         )
-        desired_short = getattr(self.config.MeshtasticReset, 'ShortName', '🔗')
+        desired_short = _reset_value('ShortName', '🔗')
         current_long = self.interface.getLongName() or ''
         current_short = self.interface.getShortName() or ''
         if (desired_long and desired_long != current_long) or (
@@ -287,36 +327,39 @@ class MeshtasticConnection:
 
         lora = node.localConfig.lora
         lora_changed = False
-        if hasattr(self.config.MeshtasticReset, 'HopLimit'):
+        hop_limit_value = _reset_value('HopLimit')
+        if hop_limit_value is not None:
             hop_limit = self.config.enforce_type(
-                int, self.config.MeshtasticReset.HopLimit
+                int, hop_limit_value
             )
             if lora.hop_limit != hop_limit:
                 diffs.append(f'hop_limit {lora.hop_limit}->{hop_limit}')
                 lora.hop_limit = hop_limit
                 lora_changed = True
-        if hasattr(self.config.MeshtasticReset, 'Region'):
+        region_value = _reset_value('Region')
+        if region_value is not None:
             try:
                 region_enum = config_pb2.Config.LoRaConfig.RegionCode.Value(
-                    self.config.MeshtasticReset.Region
+                    region_value
                 )
                 if lora.region != region_enum:
                     diffs.append(
-                        f'region {lora.region}->{self.config.MeshtasticReset.Region}'
+                        f'region {lora.region}->{region_value}'
                     )
                     lora.region = region_enum
                     lora_changed = True
             except Exception as exc:  # pylint:disable=broad-except
-                self.logger.error('Invalid region %s: %s', self.config.MeshtasticReset.Region, repr(exc))
-        if hasattr(self.config.MeshtasticReset, 'DutyCycle'):
+                self.logger.error('Invalid region %s: %s', region_value, repr(exc))
+        duty_cycle_value = _reset_value('DutyCycle')
+        if duty_cycle_value is not None:
             duty = self.config.enforce_type(
-                bool, self.config.MeshtasticReset.DutyCycle
+                bool, duty_cycle_value
             )
             if lora.override_duty_cycle != duty:
                 diffs.append(f'duty_cycle {lora.override_duty_cycle}->{duty}')
                 lora.override_duty_cycle = duty
                 lora_changed = True
-        ok_to_mqtt = getattr(self.config.MeshtasticReset, 'OkToMQTT', None)
+        ok_to_mqtt = _reset_value('OkToMQTT', None)
         if ok_to_mqtt is not None:
             ok_to_mqtt = self.config.enforce_type(bool, ok_to_mqtt)
             if lora.config_ok_to_mqtt != ok_to_mqtt:
@@ -325,7 +368,7 @@ class MeshtasticConnection:
                 )
                 lora.config_ok_to_mqtt = ok_to_mqtt
                 lora_changed = True
-        ignore_mqtt = getattr(self.config.MeshtasticReset, 'IgnoreMQTT', None)
+        ignore_mqtt = _reset_value('IgnoreMQTT', None)
         if ignore_mqtt is not None:
             ignore_mqtt = self.config.enforce_type(bool, ignore_mqtt)
             if lora.ignore_mqtt != ignore_mqtt:
@@ -335,25 +378,27 @@ class MeshtasticConnection:
         if lora_changed:
             node.writeConfig('lora')
 
-        if hasattr(self.config.MeshtasticReset, 'Role'):
+        role_value = _reset_value('Role')
+        if role_value is not None:
             try:
                 role_enum = config_pb2.Config.DeviceConfig.Role.Value(
-                    self.config.MeshtasticReset.Role
+                    role_value
                 )
                 device_cfg = node.localConfig.device
                 if device_cfg.role != role_enum:
                     diffs.append(
-                        f'role {device_cfg.role}->{self.config.MeshtasticReset.Role}'
+                        f'role {device_cfg.role}->{role_value}'
                     )
                     device_cfg.role = role_enum
                     node.writeConfig('device')
             except Exception as exc:  # pylint:disable=broad-except
-                self.logger.error('Invalid role %s: %s', self.config.MeshtasticReset.Role, repr(exc))
+                self.logger.error('Invalid role %s: %s', role_value, repr(exc))
 
-        if hasattr(self.config.MeshtasticReset, 'MapReporting'):
+        map_reporting_value = _reset_value('MapReporting')
+        if map_reporting_value is not None:
             try:
                 map_report = self.config.enforce_type(
-                    bool, self.config.MeshtasticReset.MapReporting
+                    bool, map_reporting_value
                 )
                 module_cfg = node.moduleConfig
                 if module_cfg.mqtt.map_reporting_enabled != map_report:
@@ -413,6 +458,8 @@ class MeshtasticConnection:
 
         :return:
         """
+        if self.interface is None:
+            return {}
         return self.interface.nodes or {}
 
     @property
@@ -505,9 +552,9 @@ class MeshtasticConnection:
         setthreadtitle(self.name)
 
         self.logger.debug("Opening FIFO...")
-        create_fifo(FIFO)
+        create_fifo(self.fifo)
         while not self.exit:
-            with open(FIFO, encoding='utf-8') as fifo:
+            with open(self.fifo, encoding='utf-8') as fifo:
                 for line in fifo:
                     line = line.rstrip('\n')
                     self.send_text(line, destinationId=MESHTASTIC_BROADCAST_ADDR)
@@ -521,9 +568,9 @@ class MeshtasticConnection:
         setthreadtitle("MeshtasticCmd")
 
         self.logger.debug("Opening FIFO...")
-        create_fifo(FIFO_CMD)
+        create_fifo(self.fifo_cmd)
         while not self.exit:
-            with open(FIFO_CMD, encoding='utf-8') as fifo:
+            with open(self.fifo_cmd, encoding='utf-8') as fifo:
                 for line in fifo:
                     line = line.rstrip('\n')
                     if line.startswith("reboot"):

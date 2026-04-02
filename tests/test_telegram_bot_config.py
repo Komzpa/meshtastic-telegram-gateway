@@ -1,5 +1,6 @@
 """Tests for validating Telegram configuration handling."""
 
+import asyncio
 import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -10,15 +11,15 @@ from mtg.bot.telegram.telegram import TelegramBot
 from mtg.config import Config
 
 
-class DummyDispatcher:
+class DummyApplication:
     def add_handler(self, *_args, **_kwargs):
         """No-op handler registration used for tests."""
 
 
 class DummyTelegramConnection:
     def __init__(self):
-        self.dispatcher = DummyDispatcher()
-        self.updater = SimpleNamespace(bot=SimpleNamespace(id=999999))
+        self.application = DummyApplication()
+        self.bot = SimpleNamespace(id=999999)
 
 
 def build_config(tmp_path, *, room_value='-100', admin_value='42') -> Config:
@@ -72,7 +73,7 @@ def test_echo_handles_invalid_room_value(caplog, tmp_path, meshtastic_connection
             message=None,
         )
 
-        bot.echo(update, MagicMock())
+        asyncio.run(bot.echo(update, MagicMock()))
 
     assert bot._room_id is None
     assert any('Telegram.Room' in record.message for record in caplog.records)
@@ -132,7 +133,7 @@ def test_echo_ignores_invalid_reply_mapping(
     )
 
     with caplog.at_level(logging.WARNING):
-        bot.echo(update, MagicMock())
+        asyncio.run(bot.echo(update, MagicMock()))
 
     assert meshtastic_connection.send_user_text.call_count == 1
     _, kwargs = meshtastic_connection.send_user_text.call_args
@@ -204,7 +205,7 @@ def test_handle_reaction_forwards_supported_emoji(
         effective_user=user,
     )
 
-    bot.handle_reaction(update, MagicMock())
+    asyncio.run(bot.handle_reaction(update, MagicMock()))
 
     meshtastic_connection.send_text.assert_called_once()
     args, kwargs = meshtastic_connection.send_text.call_args

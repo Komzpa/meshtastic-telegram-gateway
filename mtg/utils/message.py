@@ -48,7 +48,7 @@ def split_user_message(sender: str, msg: str, chunk_len: int):
         available = chunk_len - len(prefix) - len(counter)
         wrapper = textwrap.TextWrapper(
             width=available,
-            break_long_words=False,
+            break_long_words=True,
             break_on_hyphens=False,
             replace_whitespace=False,
         )

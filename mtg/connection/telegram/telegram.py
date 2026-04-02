@@ -1,159 +1,181 @@
 # -*- coding: utf-8 -*-
-""" Telegram connection module """
+"""Telegram connection module."""
 
-
+import asyncio
 import logging
-import time
+import queue
+from typing import Any, Optional
 
-import telegram
-from pkg_resources import parse_version
+from telegram import ReactionTypeEmoji, Update
 from telegram.error import NetworkError, TelegramError
-from telegram.ext import Updater
-# pylint:disable=no-name-in-module
-from setproctitle import setthreadtitle
-
-
-from .reaction import ensure_reaction_update_support
+from telegram.ext import Application
 
 
 class TelegramConnection:
-    """
-    Telegram connection
-    """
+    """Telegram connection wrapper built on python-telegram-bot Application."""
 
     def __init__(self, token: str, logger: logging.Logger):
         self.logger = logger
-        self.token = token
-        if parse_version(telegram.__version__) < parse_version("13.15"):
-            raise RuntimeError(
-                f"Unsupported python-telegram-bot version {telegram.__version__}; "
-                "please install 13.15"
-            )
-        ensure_reaction_update_support()
-        self.updater = Updater(token=token, use_context=True)
-        self.exit = False
-        self.name = 'Telegram Connection'
-        self._poll_backoff = 5.0
+        self.msg_queue: Optional[asyncio.Queue[tuple[tuple[Any, ...], dict[str, Any]]]] = None
+        self.q: queue.Queue[tuple[tuple[Any, ...], dict[str, Any]]] = queue.Queue()
+        self.queue_task: Optional[asyncio.Task[Any]] = None
+        self.running = False
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        self.application = Application.builder().token(token).job_queue(None).build()
 
-    def _init_updater(self):
-        """(Re)initialize telegram updater preserving handlers"""
-        self.logger.debug("Reinitializing Telegram updater")
-        old_updater = getattr(self, "updater", None)
-        new_updater = Updater(token=self.token, use_context=True)
-        if old_updater:
-            try:
-                for group, handlers in old_updater.dispatcher.handlers.items():
-                    for handler in handlers:
-                        new_updater.dispatcher.add_handler(handler, group)
-            except Exception as exc:  # pylint:disable=broad-except
-                self.logger.error("Failed to copy handlers: %s", repr(exc))
-        self.updater = new_updater
+    @property
+    def bot(self):
+        """Return the underlying Telegram bot instance."""
 
-    def send_message(self, *args, **kwargs):
-        """
-        Send Telegram message
+        return self.application.bot
 
-        :param args:
-        :param kwargs:
-        :return:
-        """
-        retries = 0
-        while retries < 5 and not self.exit:
-            try:
-                return self.updater.bot.send_message(*args, **kwargs)
-            except NetworkError as exc:
-                self.logger.error('Telegram network error: %s', repr(exc))
-            except TelegramError as exc:  # pylint:disable=broad-except
-                self.logger.error('Telegram error: %s', repr(exc))
-            retries += 1
-            time.sleep(5)
-        self.logger.error('Failed to send Telegram message after retries')
-        return None
+    def send_message_sync(self, *args: Any, **kwargs: Any) -> None:
+        """Send a Telegram message from a non-async context."""
 
-    def send_reaction(self, chat_id: int, message_id: int, emoji: str, is_big: bool = False):
-        """Attempt to set a Telegram reaction, fallback to textual reply if unavailable."""
+        return self.send_message(*args, **kwargs)
 
-        payload = {
-            'chat_id': chat_id,
-            'message_id': message_id,
-            'reaction': [{'type': 'emoji', 'emoji': emoji}],
-        }
-        if is_big:
-            payload['is_big'] = True
+    def send_message(self, *args: Any, **kwargs: Any) -> None:
+        """Send a Telegram message from a synchronous context."""
+
+        if self.loop is None or self.loop.is_closed():
+            self.logger.warning("Application loop not initialized yet, message will be dropped")
+            return None
+        future = asyncio.run_coroutine_threadsafe(
+            self.application.bot.send_message(*args, **kwargs),
+            self.loop,
+        )
+        try:
+            return future.result(timeout=30)
+        except Exception as exc:  # pylint:disable=broad-except
+            self.logger.error("Failed to send Telegram message: %s", repr(exc))
+            return None
+
+    async def _send_reaction_async(
+        self,
+        chat_id: int,
+        message_id: int,
+        emoji: str,
+        is_big: bool = False,
+    ):
+        """Attempt to set a Telegram reaction, fallback to a textual reply if unavailable."""
 
         try:
-            self.updater.bot._post('setMessageReaction', data=payload, timeout=10)  # pylint:disable=protected-access
+            await self.application.bot.set_message_reaction(
+                chat_id=chat_id,
+                message_id=message_id,
+                reaction=[ReactionTypeEmoji(emoji=emoji)],
+                is_big=is_big,
+            )
             return True, None
-        except (NetworkError, TelegramError) as exc:  # pylint:disable=broad-except
-            self.logger.warning('Falling back to textual reaction: %s', repr(exc))
-        message = self.send_message(
+        except (NetworkError, TelegramError, TypeError, ValueError) as exc:
+            self.logger.warning("Falling back to textual reaction: %s", repr(exc))
+
+        fallback = await self.application.bot.send_message(
             chat_id=chat_id,
             text=emoji,
             reply_to_message_id=message_id,
         )
-        return False, message
+        return False, fallback
+
+    def send_reaction(
+        self,
+        chat_id: int,
+        message_id: int,
+        emoji: str,
+        is_big: bool = False,
+    ):
+        """Set a Telegram reaction from a synchronous context."""
+
+        if self.loop is None or self.loop.is_closed():
+            self.logger.warning("Application loop not initialized yet, reaction will be dropped")
+            return False, None
+        future = asyncio.run_coroutine_threadsafe(
+            self._send_reaction_async(
+                chat_id=chat_id,
+                message_id=message_id,
+                emoji=emoji,
+                is_big=is_big,
+            ),
+            self.loop,
+        )
+        try:
+            return future.result(timeout=30)
+        except Exception as exc:  # pylint:disable=broad-except
+            self.logger.error("Failed to send Telegram reaction: %s", repr(exc))
+            return False, None
+
+    async def _process_message_queue(self) -> None:
+        """Process queued Telegram messages."""
+
+        if self.msg_queue is None:
+            self.logger.error("Message queue not initialized")
+            return
+
+        while self.running:
+            try:
+                args, kwargs = self.q.get(timeout=1.0)
+            except queue.Empty:
+                try:
+                    args, kwargs = await asyncio.wait_for(self.msg_queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+
+            try:
+                await self.application.bot.send_message(*args, **kwargs)
+            except (NetworkError, TelegramError, TypeError, ValueError, RuntimeError) as exc:
+                self.logger.error("Failed to send Telegram message: %s", repr(exc))
+
+    async def start_queue_processor(self) -> None:
+        """Start the async queue processor."""
+
+        if self.running:
+            return
+        if self.msg_queue is None:
+            self.msg_queue = asyncio.Queue()
+        self.running = True
+        self.queue_task = asyncio.create_task(self._process_message_queue())
+        self.logger.info("Message queue processor started")
+
+    async def stop_queue_processor(self) -> None:
+        """Stop the async queue processor."""
+
+        self.running = False
+        if self.queue_task is not None:
+            self.queue_task.cancel()
+            try:
+                await self.queue_task
+            except asyncio.CancelledError:
+                pass
+            self.queue_task = None
+            self.logger.info("Message queue processor stopped")
+
+    def stop_queue_processor_sync(self) -> None:
+        """Stop the async queue processor from a synchronous context."""
+
+        self.running = False
+        if self.loop is None or self.loop.is_closed():
+            self.queue_task = None
+            return
+        if self.queue_task is not None:
+            future = asyncio.run_coroutine_threadsafe(self.stop_queue_processor(), self.loop)
+            try:
+                future.result(timeout=5)
+            except Exception:  # pylint:disable=broad-except
+                self.logger.debug("Queue processor shutdown timed out", exc_info=True)
+                self.queue_task = None
 
     def poll(self) -> None:
-        """
-        Run Telegram bot polling
+        """Run Telegram polling."""
 
-        :return:
-        """
-        setthreadtitle(self.name)
-        while not self.exit:
-            delay = None
-            try:
-                self.logger.debug("Starting Telegram polling loop")
-                self.updater.start_polling()
-                self._poll_backoff = 5.0
+        self.logger.info("Polling Telegram...")
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_until_complete(self.start_queue_processor())
+        self.application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-                while not self.exit:
-                    time.sleep(1)
-            except (NetworkError, TelegramError) as exc:
-                delay = self._next_poll_delay(exc)
-                self.logger.warning(
-                    'Telegram polling error: %s; retrying in %.1f seconds',
-                    repr(exc),
-                    delay,
-                    exc_info=True,
-                )
-                # recreate updater on errors to ensure handlers are registered
-                self._init_updater()
-            finally:
-                try:
-                    self.updater.stop()
-                except Exception:  # pylint:disable=broad-except
-                    self.logger.exception("Failed to stop updater")
-                self.logger.debug("Telegram polling loop stopped")
-            if self.exit:
-                break
-            if delay is None:
-                time.sleep(1)
-            else:
-                time.sleep(delay)
+    def shutdown(self) -> None:
+        """Stop the Telegram bot."""
 
-    @property
-    def dispatcher(self) -> telegram.ext.Dispatcher:
-        """
-        Return Telegram dispatcher for commands
-
-        :return:
-        """
-        return self.updater.dispatcher
-
-    def shutdown(self):
-        """
-        Stop Telegram bot
-        """
-        self.exit = True
-        self.updater.stop()
-
-    def _next_poll_delay(self, exc: Exception) -> float:
-        """Return the next polling backoff delay based on the exception."""
-
-        description = repr(exc)
-        if any(text in description for text in ('Timed out', 'Connection reset by peer')):
-            self._poll_backoff = min(self._poll_backoff * 2, 60.0)
-        else:
-            self._poll_backoff = min(self._poll_backoff + 5.0, 60.0)
-        return self._poll_backoff
+        self.stop_queue_processor_sync()
+        self.application.stop_running()

@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
-# pylint: skip-file
-import pytest
 import asyncio
+import concurrent.futures
 import sys
 from unittest.mock import MagicMock, patch, AsyncMock
+
+import pytest
 
 # Mock external dependencies to avoid import conflicts
 mock_telegram = MagicMock()
@@ -40,8 +40,12 @@ class TestTelegramConnection:
             with patch('logging.getLogger') as mock_get_logger:
                 mock_logger_httpx = MagicMock()
                 mock_get_logger.return_value = mock_logger_httpx
+                mock_builder_chain = MagicMock()
                 mock_app = MagicMock()
-                mock_builder.return_value.token.return_value.build.return_value = mock_app
+                mock_builder.return_value = mock_builder_chain
+                mock_builder_chain.token.return_value = mock_builder_chain
+                mock_builder_chain.job_queue.return_value = mock_builder_chain
+                mock_builder_chain.build.return_value = mock_app
 
                 conn = TelegramConnection("test_token", mock_logger)
 
@@ -54,25 +58,31 @@ class TestTelegramConnection:
     async def test_send_message(self, telegram_connection):
         """Test send_message method"""
         telegram_connection.application.bot = AsyncMock()
-        # Initialize the message queue with the current event loop
-        telegram_connection.msg_queue = asyncio.Queue()
+        telegram_connection.loop = MagicMock()
+        telegram_connection.loop.is_closed.return_value = False
+        future = concurrent.futures.Future()
+        future.set_result(MagicMock())
 
         with patch('asyncio.run_coroutine_threadsafe') as mock_run_threadsafe:
+            mock_run_threadsafe.return_value = future
             telegram_connection.send_message(chat_id=12345, text="Test message")
 
             mock_run_threadsafe.assert_called_once()
-            # Verify the coroutine was passed to asyncio.run_coroutine_threadsafe
             coro = mock_run_threadsafe.call_args[0][0]
             assert asyncio.iscoroutine(coro)
+            coro.close()
 
     @pytest.mark.asyncio
     async def test_send_message_with_args_and_kwargs(self, telegram_connection):
         """Test send_message method with various args and kwargs"""
         telegram_connection.application.bot = AsyncMock()
-        # Initialize the message queue with the current event loop
-        telegram_connection.msg_queue = asyncio.Queue()
+        telegram_connection.loop = MagicMock()
+        telegram_connection.loop.is_closed.return_value = False
+        future = concurrent.futures.Future()
+        future.set_result(MagicMock())
 
         with patch('asyncio.run_coroutine_threadsafe') as mock_run_threadsafe:
+            mock_run_threadsafe.return_value = future
             telegram_connection.send_message(
                 12345, "Test message",
                 parse_mode="HTML",
@@ -80,6 +90,9 @@ class TestTelegramConnection:
             )
 
             mock_run_threadsafe.assert_called_once()
+            coro = mock_run_threadsafe.call_args[0][0]
+            assert asyncio.iscoroutine(coro)
+            coro.close()
 
     def test_poll(self, telegram_connection):
         """Test poll method"""
@@ -119,6 +132,7 @@ class TestTelegramConnection:
             mock_token_builder = MagicMock()
             mock_builder.return_value = mock_token_builder
             mock_token_builder.token.return_value = mock_token_builder
+            mock_token_builder.job_queue.return_value = mock_token_builder
             mock_app = MagicMock()
             mock_token_builder.build.return_value = mock_app
 
@@ -126,6 +140,7 @@ class TestTelegramConnection:
 
             mock_builder.assert_called_once()
             mock_token_builder.token.assert_called_once_with("my_secret_token")
+            mock_token_builder.job_queue.assert_called_once_with(None)
             mock_token_builder.build.assert_called_once()
 
     @pytest.mark.asyncio
