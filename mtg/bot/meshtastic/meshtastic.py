@@ -498,6 +498,55 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
             text=f"Battery {emoji} {battery}% for {node_name}",
         )
 
+    def _resolve_node_name(self, from_id: str, interface: meshtastic_serial_interface.SerialInterface) -> str:
+        """Best-effort node name lookup for logs and user-facing replies."""
+
+        node_info = interface.nodes.get(from_id)
+        if node_info is not None:
+            user_info = node_info.get('user')
+            if user_info:
+                return user_info.get('longName', from_id)
+
+        found, record = self.database.get_node_record(from_id)
+        if found:
+            return record.nodeName
+        return from_id
+
+    def _process_rangetest(
+        self,
+        packet,
+        decoded,
+        from_id: str,
+        to_id,
+        interface: meshtastic_serial_interface.SerialInterface,
+    ) -> bool:
+        """Handle rangetest packets and suppress channel forwarding."""
+
+        portnum = decoded.get('portnum')
+        if portnum not in ('RANGE_TEST_APP', 'TEXT_MESSAGE_APP'):
+            return False
+
+        msg = decoded.get('text', '')
+        if re.match(r'^seq\s+[0-9]+\b', msg, re.I) is None:
+            return portnum == 'RANGE_TEST_APP'
+
+        node_name = self._resolve_node_name(from_id, interface)
+        self.logger.debug("User %s has sent range test packet: %s", node_name, msg)
+
+        if to_id != MESHTASTIC_BROADCAST_ADDR:
+            return True
+
+        reply = f"Got your rangetest packet ({msg}). Please remember to turn rangetest off when you're done."
+        try:
+            sent_packets = self.meshtastic_connection.send_text(reply, destinationId=from_id)
+            if not sent_packets:
+                self.logger.warning("Rangetest nag send returned no packets for %s (%s)", node_name, from_id)
+            else:
+                self.logger.info("Sent rangetest nag to %s (%s): %s", node_name, from_id, msg)
+        except Exception as exc:  # pylint:disable=broad-except
+            self.logger.error("Failed to send rangetest nag to %s (%s): %s", node_name, from_id, repr(exc))
+        return True
+
     # pylint:disable=too-many-branches, too-many-statements, too-many-return-statements
     def on_receive(self, packet, interface: meshtastic_serial_interface.SerialInterface) -> None:
         """
@@ -531,6 +580,8 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
             return
         #
         if decoded.get('portnum') != 'TEXT_MESSAGE_APP':
+            if self._process_rangetest(packet, decoded, from_id, to_id, interface):
+                return
             # notifications
             if decoded.get('portnum') == 'POSITION_APP':
                 # Log if writer is enabled
@@ -557,6 +608,8 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
             return
         # get msg
         msg = decoded.get('text', '')
+        if self._process_rangetest(packet, decoded, from_id, to_id, interface):
+            return
 
         # ignore non-broadcast messages
         if to_id != MESHTASTIC_BROADCAST_ADDR:
@@ -588,11 +641,6 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
         # skip commands
         if msg.startswith('/'):
             self.process_meshtastic_command(packet, interface)
-            return
-
-        # Range test module should not spam telegram room
-        if re.match(r'^seq\s[0-9]+', msg, re.I) is not None:
-            self.logger.debug(f"User {long_name} has sent range test... {msg}")
             return
 
         # Telemetry
