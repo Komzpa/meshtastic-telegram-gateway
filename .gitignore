@@ -130,10 +130,15 @@ dmypy.json
 
 # local
 logfile*
+logs/
 mesh.ini
 meshtastic.sqlite
 meshtastic.sqlite.bkp
 meshtastic.sqlite-journal
+.codex/
+CLAUDE.md
+GEMINI.md
+doc/PROJECT_NOTES.md
 
 # PyCharm
 .idea/
