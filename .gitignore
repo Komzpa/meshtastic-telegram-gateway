@@ -135,6 +135,7 @@ mesh.ini
 meshtastic.sqlite
 meshtastic.sqlite.bkp
 meshtastic.sqlite-journal
+.codex
 .codex/
 CLAUDE.md
 GEMINI.md
