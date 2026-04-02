@@ -145,7 +145,10 @@ def main(args):
     external_plugins = ExternalPlugins(database, config, meshtastic_connection, telegram_connection, logger)
 
     # non-blocking
-    aprs_streamer.run()
+    if config.enforce_type(bool, config.APRS.Enabled):
+        aprs_streamer.run()
+    else:
+        logger.info('APRS disabled by configuration; streamer not started')
     # FIFO watcher
     meshtastic_connection.run()
     web_server.run()
