@@ -95,6 +95,50 @@ Default value is 3600 seconds. Can be changed using `?tail=xxx` query string, e.
 9. Run `/start.sh`
 10. Enjoy
 
+## Deployment
+
+There are currently three supported deployment styles in this repository:
+
+1. `systemd` service
+   Recommended for always-on hosts such as Raspberry Pi.
+   The service usually runs the same long-lived `./mesh.py run -c ./mesh.ini` loop that `make run` uses, but lets the OS manage startup, restart, and logs.
+
+2. `start.sh` / `screen`
+   Legacy simple deployment for manual hosts.
+   `./start.sh` launches the gateway and monitor in detached `screen` sessions.
+
+3. Docker Compose
+   Use `docker compose up --build -d` when you want containerized deployment.
+
+If you maintain both docs and infrastructure, prefer documenting which one is authoritative for each host.
+For example, the Raspberry Pi deployment in this repo is managed by `systemd`, even though `start.sh` is still available as a manual fallback.
+
+### Typical systemd workflow
+
+```bash
+git pull --ff-only
+pip3 install -r requirements.txt
+sudo systemctl restart meshtastic-mesh.service
+sudo systemctl status meshtastic-mesh.service
+```
+
+### Typical screen-based workflow
+
+```bash
+git pull --ff-only
+pip3 install -r requirements.txt
+./start.sh
+screen -ls
+```
+
+### Typical Docker workflow
+
+```bash
+git pull --ff-only
+docker compose up --build -d
+docker compose ps
+```
+
 
 ## Supported bot commands
 
@@ -217,4 +261,3 @@ class FooBar(ExternalBase):
     def run(self):
         asyncio.run(self.handler.main())
 ```
-
