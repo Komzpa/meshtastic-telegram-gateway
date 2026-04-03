@@ -1,7 +1,7 @@
 import logging
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, UTC
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -61,7 +61,9 @@ class FakeInterface:
 @pytest.fixture(scope="module")
 def meshtastic_db(tmp_path_factory):
     db_path = tmp_path_factory.mktemp("db") / "links.sqlite"
-    return MeshtasticDB(str(db_path), logging.getLogger("test"))
+    db = MeshtasticDB(str(db_path), logging.getLogger("test"))
+    yield db
+    db.close()
 
 
 @pytest.fixture(autouse=True)
@@ -114,7 +116,7 @@ def test_existing_database_with_32bit_constraints_is_migrated(tmp_path, meshtast
     _create_legacy_message_link_tables(db_path)
 
     try:
-        created_at = datetime.utcnow().isoformat()
+        created_at = datetime.now(UTC).isoformat()
         with sqlite3.connect(db_path) as conn:
             conn.execute(
                 '''
@@ -191,7 +193,10 @@ def test_existing_database_with_32bit_constraints_is_migrated(tmp_path, meshtast
         assert '2147483647' not in schema_sql
         assert '2147483647' not in alias_sql
     finally:
-        MeshtasticDB(str(original_db_path), logging.getLogger("test"))
+        if 'migrated_db' in locals():
+            migrated_db.close()
+        restored_db = MeshtasticDB(str(original_db_path), logging.getLogger("test"))
+        restored_db.close()
 
 
 def test_send_user_text_multipart_chain():

@@ -6,7 +6,7 @@ import re
 import sqlite3
 import time
 #
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import (
     AnyStr,
     Iterable,
@@ -136,7 +136,7 @@ class MessageLinkAlias(DB.Entity):  # pylint:disable=too-few-public-methods
     previous_packet_id = Optional(int, size=64)
 
 
-class MeshtasticDB:
+class MeshtasticDB:  # pylint:disable=too-many-public-methods
     """
     Meshtastic events database
     """
@@ -356,6 +356,21 @@ class MeshtasticDB:
         """
         self.connection = connection
 
+    @staticmethod
+    def close() -> None:
+        """Close the shared Pony ORM database connection if it is open."""
+
+        if DB.provider is not None:
+            DB.disconnect()
+
+    def __del__(self) -> None:
+        """Best-effort cleanup for test-created database wrappers."""
+
+        try:
+            self.close()
+        except (AttributeError, TypeError, sqlite3.Error):  # pragma: no cover - destructor safety
+            pass
+
     @db_session
     def get_filter(self, connection, identifier):
         """
@@ -407,6 +422,7 @@ class MeshtasticDB:
 
     @staticmethod
     @db_session
+    # pylint:disable=too-many-arguments
     def ensure_message_link(
         *,
         direction: str,
@@ -421,7 +437,7 @@ class MeshtasticDB:
     ) -> MessageLinkRecord:
         """Create or update a message link record."""
 
-        now = datetime.utcnow()
+        now = datetime.now(UTC).replace(tzinfo=None)
         record = None
         if telegram_chat_id is not None and telegram_message_id is not None:
             record = MessageLinkRecord.get(
@@ -487,7 +503,7 @@ class MeshtasticDB:
         record.telegram_message_id = telegram_message_id
         if telegram_thread_id is not None:
             record.telegram_thread_id = telegram_thread_id
-        record.updated_at = datetime.utcnow()
+        record.updated_at = datetime.now(UTC).replace(tzinfo=None)
         if record.status != MESSAGE_STATUS_SENT:
             record.status = MESSAGE_STATUS_SENT
             record.last_error = ""
@@ -507,7 +523,7 @@ class MeshtasticDB:
         record = MessageLinkRecord.get(id=record_id)
         if record is None:
             return
-        now = datetime.utcnow()
+        now = datetime.now(UTC).replace(tzinfo=None)
         record.status = MESSAGE_STATUS_SENT
         record.updated_at = now
         # Pony ORM does not allow assigning ``None`` to optional string
@@ -532,7 +548,7 @@ class MeshtasticDB:
             return
         record.status = MESSAGE_STATUS_FAILED
         record.last_error = error
-        record.updated_at = datetime.utcnow()
+        record.updated_at = datetime.now(UTC).replace(tzinfo=None)
 
     @staticmethod
     @db_session
@@ -544,7 +560,7 @@ class MeshtasticDB:
             return
         record.retries += 1
         record.last_error = error
-        record.updated_at = datetime.utcnow()
+        record.updated_at = datetime.now(UTC).replace(tzinfo=None)
 
     @staticmethod
     @db_session
@@ -601,7 +617,7 @@ class MeshtasticDB:
     ) -> TypingOptional[MessageLinkRecord]:
         """Find the most recent link matching payload (and optionally sender)."""
 
-        cutoff = datetime.utcnow() - max_age
+        cutoff = datetime.now(UTC).replace(tzinfo=None) - max_age
         candidates = []
         for link in MessageLinkRecord.select():
             if link.direction != direction:

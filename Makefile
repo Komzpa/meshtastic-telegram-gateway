@@ -8,7 +8,7 @@ all: check
 check: lint mypy test
 
 lint:
-	@pylint -r y -j 0 mesh.py mtg/
+	@pylint --fail-under=9.8 -r y -j 0 mesh.py mtg/
 
 mypy:
 	@mypy mesh.py mtg/

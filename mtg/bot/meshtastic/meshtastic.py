@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """ Meshtastic bot module """
 
+from importlib.metadata import PackageNotFoundError, version
 import logging
-import pkg_resources
 import re
 import time
 import json
@@ -378,7 +378,10 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
         if interface.myInfo:
             firmware = interface.metadata.firmware_version
             reboot_count = interface.myInfo.reboot_count
-        the_version = pkg_resources.get_distribution("meshtastic").version
+        try:
+            the_version = version("meshtastic")
+        except PackageNotFoundError:
+            the_version = 'unknown'
         from_id = str(packet.get('fromId', ''))
         formatted_time = humanize.naturaltime(time.time() - self.meshtastic_connection.get_startup_ts)
         text = f'Bot v{VERSION}/FW: v{firmware}/Meshlib: v{the_version}/Reboots: {reboot_count}.'
@@ -582,7 +585,7 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
         :param interface:
         :return:
         """
-        self.logger.debug(f"Received: {packet}")
+        self.logger.debug("Received: %s", packet)
         to_id = packet.get('toId')
         decoded = packet.get('decoded')
         from_id = str(packet.get('fromId', ''))
@@ -594,7 +597,7 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
             packet['fromId'] = from_id
         # check for blacklist
         if self.filter and self.filter.banned(from_id):
-            self.logger.debug(f"User {from_id} is in a blacklist...")
+            self.logger.debug("User %s is in a blacklist...", from_id)
             return
         # Send notifications if they're enabled
         if from_id is not None and self.config.enforce_type(bool, self.config.Telegram.NotificationsEnabled):
@@ -602,7 +605,7 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
         # check hop count
         hop_limit = packet.get('hopLimit', 0)
         if hop_limit > self.config.enforce_type(int, self.config.Meshtastic.MaxHopCount):
-            self.logger.debug(f"User {from_id} exceeds {hop_limit}...")
+            self.logger.debug("User %s exceeds %s...", from_id, hop_limit)
             return
         if decoded is None:
             self.logger.debug("Packet from %s has no decoded payload", from_id)
@@ -648,7 +651,7 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
 
             text = self.bot_handler.get_response(from_id, msg)
             if text:
-                self.logger.info(f"{from_id}: {msg} -> {text}")
+                self.logger.info("%s: %s -> %s", from_id, msg, text)
                 self.meshtastic_connection.send_text(text, destinationId=from_id)
 
             return
@@ -656,7 +659,7 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
         try:
             self.database.store_message(packet)
         except Exception as exc:  # pylint:disable=broad-except
-            self.logger.error('Could not store message: ', exc, repr(exc))
+            self.logger.error('Could not store message: %s %r', exc, exc)
         # Process commands and forward messages
         node_info = interface.nodes.get(from_id)
         long_name = from_id
@@ -675,20 +678,20 @@ class MeshtasticBot:  # pylint:disable=too-many-instance-attributes
         # Telemetry
         node_part = from_id[5:]
         if re.match(r'^(\-?[0-9]+,)+' + f'{node_part}$', msg) is not None:
-            self.logger.debug('Banned telemetry: ', from_id, msg)
+            self.logger.debug('Banned telemetry: %s %s', from_id, msg)
             return
 
         # Meshtastic nodes sometimes duplicate messages sent by bot. Filter these.
         self_name = self.meshtastic_connection.interface.getLongName()
         if msg.startswith(self_name) or self_name == long_name:
-            self.logger.debug(f"Bot duplicate via meshtastic... {msg}")
+            self.logger.debug("Bot duplicate via meshtastic... %s", msg)
             return
 
         long_name = long_name.strip()
         # Do cache check
         key = f"{long_name}:{msg}"
         if msg and self.memcache.get_ex(key):
-            self.logger.debug(f"Cache hit for {key}")
+            self.logger.debug("Cache hit for %s", key)
             return
         if msg:
             self.memcache.set(key, True, expires=300)

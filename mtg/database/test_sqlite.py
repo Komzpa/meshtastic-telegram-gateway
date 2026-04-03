@@ -18,6 +18,12 @@ def mock_logger():
 def test_db_file():
     return "/tmp/test.db"
 
+
+@pytest.fixture(autouse=True)
+def close_db_after_test():
+    yield
+    MeshtasticDB.close()
+
 @patch('mtg.database.sqlite.set_sql_debug')
 def test_sql_debug(mock_set_sql_debug):
     """Test sql_debug function"""

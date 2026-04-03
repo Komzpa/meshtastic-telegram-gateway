@@ -75,6 +75,7 @@ class TestTelegramConnection:
         mock_response.json.return_value = {'ok': True, 'result': {'message_id': 89}}
 
         with patch('mtg.connection.telegram.telegram.requests.post') as mock_post:
+            mock_post.return_value = mock_response
             result = telegram_connection.send_message(
                 12345, "Test message",
                 parse_mode="HTML",
@@ -105,7 +106,11 @@ class TestTelegramConnection:
                 with patch('asyncio.set_event_loop') as mock_set_loop:
                     mock_loop = MagicMock()
                     mock_new_loop.return_value = mock_loop
-                    mock_loop.run_until_complete = MagicMock()
+
+                    def consume_coroutine(coro):
+                        coro.close()
+
+                    mock_loop.run_until_complete.side_effect = consume_coroutine
 
                     telegram_connection.poll()
 

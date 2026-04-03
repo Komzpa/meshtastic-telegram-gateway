@@ -13,7 +13,7 @@ from telegram.error import NetworkError, TelegramError
 from telegram.ext import Application
 
 
-class TelegramConnection:
+class TelegramConnection:  # pylint:disable=too-many-instance-attributes
     """Telegram connection wrapper built on python-telegram-bot Application."""
 
     def __init__(self, token: str, logger: logging.Logger):

@@ -32,6 +32,7 @@ class JsonFormatter(logging.Formatter):
 class SizedTimedRotatingFileHandler(TimedRotatingFileHandler):
     """Rotate log files by time and size."""
 
+    # pylint: disable=too-many-arguments
     def __init__(
         self,
         filename: Union[str, os.PathLike],
@@ -55,7 +56,7 @@ class SizedTimedRotatingFileHandler(TimedRotatingFileHandler):
             utc=utc,
             atTime=at_time,
         )
-        self.maxBytes = max_bytes
+        self.maxBytes = max_bytes  # pylint:disable=invalid-name
 
     # pylint: disable=arguments-differ
     def shouldRollover(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
@@ -82,6 +83,7 @@ def setup_logger(
     max_bytes: int = 1_000_000_000,
     backup_count: int = 15,
 ) -> logging.Logger:
+    # pylint:disable=too-many-arguments
     """
     Set up logger and return usable instance
 

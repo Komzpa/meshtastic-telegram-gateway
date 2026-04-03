@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """ Meshtastic connection module """
 
+import configparser
 import logging
 import re
 import sys
@@ -63,10 +64,25 @@ class MeshtasticConnection:
         self.fifo_lock = RLock()
         self.filter = filter_class
         parser = getattr(config, 'config', None)
-        if parser is not None and parser.has_section('Meshtastic'):
+        if isinstance(parser, configparser.ConfigParser) and parser.has_section('Meshtastic'):
             meshtastic_config = parser['Meshtastic']
             self.fifo = meshtastic_config.get('FIFOPath', self.fifo)
             self.fifo_cmd = meshtastic_config.get('FIFOCmdPath', self.fifo_cmd)
+        else:
+            meshtastic_config = getattr(config, 'Meshtastic', None)
+            if meshtastic_config is not None:
+                try:
+                    fifo_path = meshtastic_config.FIFOPath
+                except (AttributeError, KeyError):
+                    fifo_path = None
+                if fifo_path:
+                    self.fifo = fifo_path
+                try:
+                    fifo_cmd_path = meshtastic_config.FIFOCmdPath
+                except (AttributeError, KeyError):
+                    fifo_cmd_path = None
+                if fifo_cmd_path:
+                    self.fifo_cmd = fifo_cmd_path
         # exit
         self.exit = False
 

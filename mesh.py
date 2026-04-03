@@ -1,26 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# pylint: disable=duplicate-code
 """ Meshtastic Telegram Gateway """
 
-import os
 import argparse
 import logging
+import os
 import sys
 import time
 from pathlib import Path
-#
-try:
-    import reverse_geocoder as _reverse_geocoder
-    _REVERSE_GEOCODER_AVAILABLE = True
-except ModuleNotFoundError:  # pragma: no cover - optional dependency
-    _reverse_geocoder = None
-    _REVERSE_GEOCODER_AVAILABLE = False
 
-
-def _noop_reverse_geocode(*_args, **_kwargs):
-    """Return an empty list when reverse geocoding is unavailable."""
-    return []
 import sentry_sdk
+try:
+    import reverse_geocoder as REVERSE_GEOCODER_MODULE
+    REVERSE_GEOCODER_AVAILABLE = True
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    REVERSE_GEOCODER_MODULE = None
+    REVERSE_GEOCODER_AVAILABLE = False
 from sentry_sdk.integrations.flask import FlaskIntegration
 #
 from mtg.bot.meshtastic import MeshtasticBot
@@ -40,6 +36,12 @@ from mtg.webapp import WebServer
 #
 from mtg.utils.rf.prefixes import ITUPrefix
 
+
+def _noop_reverse_geocode(*_args, **_kwargs):
+    """Return an empty list when reverse geocoding is unavailable."""
+    return []
+
+
 def before_send(event, hint):
     """
     Check Sentry event before sending it. Does nothing atm.
@@ -47,7 +49,7 @@ def before_send(event, hint):
     print(event, hint)
     return event
 
-# pylint:disable=too-many-locals,too-many-statements
+# pylint:disable=too-many-branches,too-many-locals,too-many-statements
 def main(args):
     """
     Main function :)
@@ -75,9 +77,9 @@ def main(args):
     log_dir = base_path / "logs"
     # our logger
     logger = setup_logger('mesh', level, json_logs=True, log_dir=log_dir)
-    if _REVERSE_GEOCODER_AVAILABLE:
+    if REVERSE_GEOCODER_AVAILABLE:
         # warm up reverse cache
-        _reverse_geocoder.search((50.5, 30.5), verbose=debug)
+        REVERSE_GEOCODER_MODULE.search((50.5, 30.5), verbose=debug)
     else:
         logger.warning(
             "reverse_geocoder package is not installed. Location lookups will be skipped."
@@ -91,8 +93,8 @@ def main(args):
     meshtastic_filter = MeshtasticFilter(database, config, logger)
     #
     telegram_connection = TelegramConnection(config.Telegram.Token, logger)
-    if _REVERSE_GEOCODER_AVAILABLE:
-        reverse_geocode_fn = _reverse_geocoder.search
+    if REVERSE_GEOCODER_AVAILABLE:
+        reverse_geocode_fn = REVERSE_GEOCODER_MODULE.search
     else:
         reverse_geocode_fn = _noop_reverse_geocode
     meshtastic_connection = RichConnection(config.Meshtastic.Device, logger, config, meshtastic_filter,

@@ -50,12 +50,8 @@ def check_room(func):
         """
         bot = args[0]
         update = args[1]
-        rooms = [
-            room_id
-            for room_id in (bot._notifications_room_id, bot._room_id)
-            if room_id is not None
-        ]
-        bot_in_rooms = bot._bot_in_rooms
+        rooms = bot.monitored_room_ids
+        bot_in_rooms = bot.bot_in_rooms
         # check rooms
         if update.effective_chat and update.effective_chat.id in rooms and not bot_in_rooms:
             return None
@@ -68,7 +64,7 @@ def check_room(func):
     return wrapper
 
 
-class TelegramBot:  # pylint:disable=too-many-public-methods
+class TelegramBot:  # pylint:disable=too-many-instance-attributes,too-many-public-methods
     """
     Telegram bot
     """
@@ -124,6 +120,21 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
 
         self._refresh_cached_config()
 
+    @property
+    def monitored_room_ids(self) -> list[int]:
+        """Return configured room IDs that the bot should react to."""
+
+        return [
+            room_id
+            for room_id in (self._notifications_room_id, self._room_id)
+            if room_id is not None
+        ]
+
+    @property
+    def bot_in_rooms(self) -> bool:
+        """Expose whether the bot is currently present in the configured rooms."""
+
+        return self._bot_in_rooms
 
     def set_aprs(self, aprs):
         """
@@ -363,7 +374,7 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
         self.logger.info(message)
         return message
 
-    async def echo(self, update: Update, _) -> None:  # pylint:disable=too-many-branches
+    async def echo(self, update: Update, _) -> None:  # pylint:disable=too-many-branches,too-many-locals,too-many-return-statements,too-many-statements
         """
         Telegram bot echo handler. Does actual message forwarding
 
@@ -566,7 +577,7 @@ class TelegramBot:  # pylint:disable=too-many-public-methods
             )
             previous_packet_id = packet.id
 
-    async def handle_reaction(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:  # pylint:disable=too-many-branches
+    async def handle_reaction(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:  # pylint:disable=too-many-branches,too-many-locals,too-many-return-statements,too-many-statements
         """Forward Telegram emoji reactions to Meshtastic."""
 
         reaction = getattr(update, 'message_reaction', None)
