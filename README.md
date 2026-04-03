@@ -1,7 +1,7 @@
 # meshtastic-telegram-gateway
 ![Build](https://github.com/tb0hdan/meshtastic-telegram-gateway/actions/workflows/build.yml/badge.svg)
 ![CodeQL](https://github.com/tb0hdan/meshtastic-telegram-gateway/actions/workflows/codeql-analysis.yml/badge.svg)
-![Python versions](https://shields.io/badge/python-3.10%20|%203.11%20|%203.12%20|%203.13%20|%203.14-green)
+![Python versions](https://shields.io/badge/python-3.9%20|%203.10%20|%203.11%20|%203.12%20|%203.13%20|%203.14-green)
 
 *Read this in other languages: [English](README.md), [Polski](README.pl.md), [Português](README.pt.md)*
 
@@ -57,7 +57,7 @@ Legend:
 
 ## Supported software
 
-Python 3.8+ is required.
+Python 3.9+ is required.
 
 ## Webapp
 
@@ -92,8 +92,9 @@ Default value is 3600 seconds. Can be changed using `?tail=xxx` query string, e.
 6. Run `sudo pip3 install -r requirements.txt`
 7. Run `gpasswd -a youruser dialout`
 8. Relogin
-9. Run `/start.sh`
-10. Enjoy
+9. On Raspberry Pi and other always-on hosts, use `systemd` as the primary deployment method.
+10. For a manual legacy session, run `/start.sh`
+11. Enjoy
 
 ## Deployment
 

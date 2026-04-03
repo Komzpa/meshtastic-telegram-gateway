@@ -6,7 +6,7 @@ import re
 import sqlite3
 import time
 #
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, timezone
 from typing import (
     AnyStr,
     Iterable,
@@ -437,7 +437,7 @@ class MeshtasticDB:  # pylint:disable=too-many-public-methods
     ) -> MessageLinkRecord:
         """Create or update a message link record."""
 
-        now = datetime.now(UTC).replace(tzinfo=None)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         record = None
         if telegram_chat_id is not None and telegram_message_id is not None:
             record = MessageLinkRecord.get(
@@ -503,7 +503,7 @@ class MeshtasticDB:  # pylint:disable=too-many-public-methods
         record.telegram_message_id = telegram_message_id
         if telegram_thread_id is not None:
             record.telegram_thread_id = telegram_thread_id
-        record.updated_at = datetime.now(UTC).replace(tzinfo=None)
+        record.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
         if record.status != MESSAGE_STATUS_SENT:
             record.status = MESSAGE_STATUS_SENT
             record.last_error = ""
@@ -523,7 +523,7 @@ class MeshtasticDB:  # pylint:disable=too-many-public-methods
         record = MessageLinkRecord.get(id=record_id)
         if record is None:
             return
-        now = datetime.now(UTC).replace(tzinfo=None)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         record.status = MESSAGE_STATUS_SENT
         record.updated_at = now
         # Pony ORM does not allow assigning ``None`` to optional string
@@ -548,7 +548,7 @@ class MeshtasticDB:  # pylint:disable=too-many-public-methods
             return
         record.status = MESSAGE_STATUS_FAILED
         record.last_error = error
-        record.updated_at = datetime.now(UTC).replace(tzinfo=None)
+        record.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     @staticmethod
     @db_session
@@ -560,7 +560,7 @@ class MeshtasticDB:  # pylint:disable=too-many-public-methods
             return
         record.retries += 1
         record.last_error = error
-        record.updated_at = datetime.now(UTC).replace(tzinfo=None)
+        record.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     @staticmethod
     @db_session
@@ -617,7 +617,7 @@ class MeshtasticDB:  # pylint:disable=too-many-public-methods
     ) -> TypingOptional[MessageLinkRecord]:
         """Find the most recent link matching payload (and optionally sender)."""
 
-        cutoff = datetime.now(UTC).replace(tzinfo=None) - max_age
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - max_age
         candidates = []
         for link in MessageLinkRecord.select():
             if link.direction != direction:

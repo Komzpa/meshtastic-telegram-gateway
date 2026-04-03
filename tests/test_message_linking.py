@@ -1,7 +1,7 @@
 import logging
 import sqlite3
 import sys
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -116,7 +116,7 @@ def test_existing_database_with_32bit_constraints_is_migrated(tmp_path, meshtast
     _create_legacy_message_link_tables(db_path)
 
     try:
-        created_at = datetime.now(UTC).isoformat()
+        created_at = datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(db_path) as conn:
             conn.execute(
                 '''
