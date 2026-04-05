@@ -191,7 +191,13 @@ class TelegramConnection:  # pylint:disable=too-many-instance-attributes
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         self.loop.run_until_complete(self.start_queue_processor())
-        self.application.run_polling(allowed_updates=Update.ALL_TYPES)
+        # This poller runs inside a worker thread, so PTB must not install
+        # process-level signal handlers for shutdown.
+        self.application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            close_loop=False,
+            stop_signals=None,
+        )
 
     def shutdown(self) -> None:
         """Stop the Telegram bot."""

@@ -116,7 +116,9 @@ class TestTelegramConnection:
 
                     # The actual call should pass the mocked Update.ALL_TYPES
                     telegram_connection.application.run_polling.assert_called_once_with(
-                        allowed_updates=['mocked_all_types']
+                        allowed_updates=['mocked_all_types'],
+                        close_loop=False,
+                        stop_signals=None,
                     )
                     # Check that start_queue_processor was called
                     mock_loop.run_until_complete.assert_called_once()

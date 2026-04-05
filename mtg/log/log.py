@@ -58,13 +58,21 @@ class SizedTimedRotatingFileHandler(TimedRotatingFileHandler):
         )
         self.maxBytes = max_bytes  # pylint:disable=invalid-name
 
+    def _open(self):  # type: ignore[override]
+        Path(self.baseFilename).parent.mkdir(parents=True, exist_ok=True)
+        return super()._open()
+
     # pylint: disable=arguments-differ
     def shouldRollover(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
         if self.maxBytes > 0:
             if self.stream is None:
                 self.stream = self._open()
             if self.stream is not None:
-                self.stream.seek(0, os.SEEK_END)
+                try:
+                    self.stream.seek(0, os.SEEK_END)
+                except FileNotFoundError:
+                    self.stream = self._open()
+                    self.stream.seek(0, os.SEEK_END)
                 current_size = self.stream.tell()
                 if current_size >= self.maxBytes:
                     return True
