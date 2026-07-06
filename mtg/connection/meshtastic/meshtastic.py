@@ -98,13 +98,13 @@ class MeshtasticConnection:
     def _connect_once(self):
         if self.dev_path.startswith('tcp:'):
             self.interface = meshtastic_tcp_interface.TCPInterface(
-                self.dev_path.removeprefix('tcp:'), debugOut=sys.stdout
+                self.dev_path.removeprefix('tcp:'), debugOut=None
             )
         elif self.dev_path == 'mqtt':
-            self.interface = MQTTInterface(debugOut=sys.stdout, cfg=self.config, logger=self.logger)
+            self.interface = MQTTInterface(debugOut=None, cfg=self.config, logger=self.logger)
         else:
             self.interface = meshtastic_serial_interface.SerialInterface(
-                devPath=self.dev_path, debugOut=sys.stdout
+                devPath=self.dev_path, debugOut=None
             )
 
     def connect(self):
