@@ -231,16 +231,12 @@ class TelegramBot:  # pylint:disable=too-many-instance-attributes,too-many-publi
         if not packets:
             database.mark_link_retry(record.id, 'meshtastic send returned None')
             return
-        first_packet = packets[0]
-        database.mark_link_sent(record.id, meshtastic_packet_id=first_packet.id)
-        previous_packet_id = sanitized_reply_id
-        for packet in packets:
-            database.add_link_alias(
-                record.id,
-                packet.id,
-                previous_packet_id=previous_packet_id,
-            )
-            previous_packet_id = packet.id
+        self._mark_meshtastic_packets_sent(
+            database,
+            record.id,
+            packets,
+            previous_packet_id=sanitized_reply_id,
+        )
 
     @staticmethod
     def _split_sender_payload(text: str) -> Tuple[Optional[str], str]:
@@ -528,9 +524,10 @@ class TelegramBot:  # pylint:disable=too-many-instance-attributes,too-many-publi
                 emoji=emoji_code,
             )
             if packets:
-                self.meshtastic_connection.database.mark_link_sent(
+                self._mark_meshtastic_packets_sent(
+                    self.meshtastic_connection.database,
                     record.id,
-                    meshtastic_packet_id=packets[0].id,
+                    packets,
                 )
             else:
                 self.meshtastic_connection.database.mark_link_retry(
@@ -567,19 +564,12 @@ class TelegramBot:  # pylint:disable=too-many-instance-attributes,too-many-publi
             )
             return
 
-        first_packet = packets[0]
-        self.meshtastic_connection.database.mark_link_sent(
+        self._mark_meshtastic_packets_sent(
+            self.meshtastic_connection.database,
             record.id,
-            meshtastic_packet_id=first_packet.id,
+            packets,
+            previous_packet_id=reply_packet_id,
         )
-        previous_packet_id = reply_packet_id
-        for packet in packets:
-            self.meshtastic_connection.database.add_link_alias(
-                record.id,
-                packet.id,
-                previous_packet_id=previous_packet_id,
-            )
-            previous_packet_id = packet.id
 
     async def handle_reaction(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:  # pylint:disable=too-many-branches,too-many-locals,too-many-return-statements,too-many-statements
         """Forward Telegram emoji reactions to Meshtastic."""
@@ -702,9 +692,10 @@ class TelegramBot:  # pylint:disable=too-many-instance-attributes,too-many-publi
             emoji=emoji_code,
         )
         if packets:
-            self.meshtastic_connection.database.mark_link_sent(
+            self._mark_meshtastic_packets_sent(
+                self.meshtastic_connection.database,
                 link_record.id,
-                meshtastic_packet_id=packets[0].id,
+                packets,
             )
         else:
             self.meshtastic_connection.database.mark_link_retry(
@@ -1018,3 +1009,32 @@ class TelegramBot:  # pylint:disable=too-many-instance-attributes,too-many-publi
         except (TypeError, ValueError) as exc:
             self._get_logger().warning('Invalid %s %r: %s', context, value, exc)
             return None
+
+    def _mark_meshtastic_packets_sent(
+        self,
+        database,
+        record_id: int,
+        packets,
+        *,
+        previous_packet_id: Optional[int] = None,
+    ) -> None:
+        """Mark a Telegram-to-mesh record sent and store aliases for packets with IDs."""
+
+        packet_ids = [getattr(packet, 'id', None) for packet in packets]
+        first_packet_id = next((packet_id for packet_id in packet_ids if packet_id is not None), None)
+        database.mark_link_sent(record_id, meshtastic_packet_id=first_packet_id)
+
+        prior_packet_id = previous_packet_id
+        for packet_id in packet_ids:
+            if packet_id is None:
+                self._get_logger().warning(
+                    'Meshtastic send returned a packet without id for record %s',
+                    record_id,
+                )
+                continue
+            database.add_link_alias(
+                record_id,
+                packet_id,
+                previous_packet_id=prior_packet_id,
+            )
+            prior_packet_id = packet_id

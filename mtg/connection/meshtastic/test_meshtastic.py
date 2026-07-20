@@ -3,6 +3,7 @@
 import pytest
 import time
 import logging
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, Mock, call, mock_open, PropertyMock, ANY
 from threading import Thread
 
@@ -167,22 +168,66 @@ class TestMeshtasticConnection:
 
         mock_interface.sendText.assert_called_once_with("Short message")
 
-    @patch('mtg.connection.meshtastic.meshtastic.split_message')
     @patch('mtg.connection.meshtastic.meshtastic.mesh_pb2')
-    def test_send_text_long_message(self, mock_mesh_pb2, mock_split_message, meshtastic_connection):
+    def test_send_text_long_message(self, mock_mesh_pb2, meshtastic_connection):
         """Test send_text with long message that needs splitting"""
         mock_mesh_pb2.Constants.DATA_PAYLOAD_LEN = 20
         mock_interface = MagicMock()
+        sent_packets = [SimpleNamespace(id=1), SimpleNamespace(id=2), SimpleNamespace(id=3)]
+        mock_interface.sendText.side_effect = sent_packets
         meshtastic_connection.interface = mock_interface
 
-        long_message = "This is a very long message that needs to be split"
-        meshtastic_connection.send_text(long_message, destinationId="12345")
+        result = meshtastic_connection.send_text(
+            "abcdefghijklmnopqrstuvwxyz",
+            destinationId="12345",
+        )
 
-        mock_split_message.assert_called_once_with(
-            long_message,
-            10,  # DATA_PAYLOAD_LEN // 2
-            mock_interface.sendText,
-            destinationId="12345"
+        assert result == sent_packets
+        assert mock_interface.sendText.call_args_list == [
+            call("abcdefghij", destinationId="12345"),
+            call("klmnopqrst", destinationId="12345"),
+            call("uvwxyz", destinationId="12345"),
+        ]
+
+    @patch('mtg.connection.meshtastic.meshtastic.mesh_pb2')
+    def test_send_text_multipart_reply_reuses_original_reply_id(self, mock_mesh_pb2, meshtastic_connection):
+        """Multipart replies should not reply to their own previous parts."""
+        mock_mesh_pb2.Constants.DATA_PAYLOAD_LEN = 20
+        mock_interface = MagicMock()
+        sent_packets = [SimpleNamespace(id=101), SimpleNamespace(id=102), SimpleNamespace(id=103)]
+        meshtastic_connection.interface = mock_interface
+        meshtastic_connection._send_rich_text = MagicMock(side_effect=sent_packets)
+
+        result = meshtastic_connection.send_text(
+            "abcdefghijklmnopqrstuvwxyz",
+            reply_id=42,
+            destinationId="12345",
+        )
+
+        assert result == sent_packets
+        assert [
+            send_call.kwargs["reply_id"]
+            for send_call in meshtastic_connection._send_rich_text.call_args_list
+        ] == [42, 42, 42]
+
+    @patch('mtg.connection.meshtastic.meshtastic.mesh_pb2')
+    def test_send_user_text_multipart_reuses_original_reply_id(self, mock_mesh_pb2, meshtastic_connection):
+        """User-prefixed multipart messages keep replying to the original mesh packet."""
+        mock_mesh_pb2.Constants.DATA_PAYLOAD_LEN = 60
+        packets = [SimpleNamespace(id=10), SimpleNamespace(id=11), SimpleNamespace(id=12)]
+        meshtastic_connection.send_text = MagicMock(side_effect=[[packet] for packet in packets])
+
+        result = meshtastic_connection.send_user_text(
+            "Telegram User",
+            "abcdefghijklmnopqrstuvwxyz",
+            reply_id=77,
+            destinationId="12345",
+        )
+
+        assert result == packets
+        assert all(
+            send_call.kwargs["reply_id"] == 77
+            for send_call in meshtastic_connection.send_text.call_args_list
         )
 
     def test_send_data_no_interface(self, meshtastic_connection):

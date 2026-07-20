@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 # Mock external dependencies before any imports happen
 external_modules = [
     'telegram',
+    'telegram.error',
     'telegram.ext',
     'telegram.constants',
     'meshtastic',
@@ -14,6 +15,8 @@ external_modules = [
     'meshtastic.tcp_interface',
     'meshtastic.mesh_pb2',
     'meshtastic.portnums_pb2',
+    'meshtastic.protobuf',
+    'meshtastic.protobuf.config_pb2',
     'meshtastic.stream_interface',
     'slack_sdk',
     'slack_sdk.rtm_v2',
@@ -45,3 +48,4 @@ mock_constants = MagicMock()
 mock_constants.DATA_PAYLOAD_LEN = 240
 sys.modules['meshtastic'].mesh_pb2 = MagicMock()
 sys.modules['meshtastic'].mesh_pb2.Constants = mock_constants
+sys.modules['meshtastic.protobuf'].config_pb2 = sys.modules['meshtastic.protobuf.config_pb2']

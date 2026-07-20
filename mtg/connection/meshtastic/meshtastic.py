@@ -166,29 +166,20 @@ class MeshtasticConnection:
                 _send_single(msg, reply_id)
             return results
 
-        if reply_id is None and emoji is None:
-            with self.lock:
-                split_message(msg, chunk_len, self.interface.sendText, **send_kwargs)
-            return results
-
         with self.lock:
-            next_reply_id = reply_id
-
             def _send_part(part, **cb_kwargs):
-                nonlocal next_reply_id
                 cb_kwargs = dict(cb_kwargs)
-                target_reply_id = next_reply_id
-                if target_reply_id is None and results:
-                    target_reply_id = results[-1].id
-                packet = self._send_rich_text(
-                    part,
-                    reply_id=target_reply_id,
-                    emoji=emoji,
-                    **cb_kwargs,
-                ) if (target_reply_id is not None or emoji is not None) else self.interface.sendText(part, **cb_kwargs)
+                if reply_id is not None or emoji is not None:
+                    packet = self._send_rich_text(
+                        part,
+                        reply_id=reply_id,
+                        emoji=emoji,
+                        **cb_kwargs,
+                    )
+                else:
+                    packet = self.interface.sendText(part, **cb_kwargs)
                 if packet:
                     results.append(packet)
-                    next_reply_id = packet.id
 
             split_message(msg, chunk_len, _send_part, **send_kwargs)
         return results
@@ -235,12 +226,10 @@ class MeshtasticConnection:
             return self.send_text(full, reply_id=reply_id, **kwargs)
         parts = split_user_message(sender, message, chunk_len)
         packets = []
-        next_reply_id = reply_id
         for part in parts:
-            sent_packets = self.send_text(part, reply_id=next_reply_id, **kwargs)
+            sent_packets = self.send_text(part, reply_id=reply_id, **kwargs)
             if sent_packets:
                 packets.extend(sent_packets)
-                next_reply_id = sent_packets[-1].id
         return packets
 
     def send_data(self, *args, **kwargs) -> None:
