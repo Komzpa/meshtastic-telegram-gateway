@@ -2,7 +2,7 @@
 # pylint: skip-file
 import pytest
 from unittest.mock import MagicMock
-from mtg.utils.message import split_message
+from mtg.utils.message import encoded_len, split_message, split_user_message
 
 
 @pytest.fixture
@@ -74,9 +74,7 @@ def test_split_message_very_long_line(mock_callback):
 
     split_message(long_line, chunk_len, mock_callback)
 
-    # Should be called multiple times for the long line
-    # Implementation adds 1 to handle remainder: (150 // 50) + 1 = 4 calls
-    assert mock_callback.call_count == 4
+    assert mock_callback.call_count == 3
 
     # Check that each call has the right chunk size or less
     for call in mock_callback.call_args_list:
@@ -90,10 +88,7 @@ def test_split_message_exact_chunk_boundary(mock_callback):
 
     split_message(message, chunk_len, mock_callback)
 
-    # The implementation will call twice: once with the message, once with empty string
-    assert mock_callback.call_count == 2
-    # First call should be with the full message
-    mock_callback.assert_any_call(message)
+    mock_callback.assert_called_once_with(message)
 
 def test_split_message_mixed_line_lengths(mock_callback):
     """Test splitting with mixed line lengths"""
@@ -115,3 +110,32 @@ def test_split_message_callback_not_called_for_empty_parts(mock_callback):
     split_message(message, chunk_len, mock_callback)
 
     mock_callback.assert_not_called()
+
+
+def test_split_message_uses_utf8_payload_length(mock_callback):
+    """Unicode chunks must fit the Meshtastic byte payload limit."""
+    message = "абвгд" * 20
+    chunk_len = 30
+
+    split_message(message, chunk_len, mock_callback)
+
+    assert mock_callback.call_count > 1
+    for call in mock_callback.call_args_list:
+        chunk = call[0][0]
+        assert encoded_len(chunk) <= chunk_len
+
+
+def test_split_user_message_uses_utf8_payload_length():
+    """Sender-prefixed chunks must account for UTF-8 byte length."""
+    sender = "Maxim მაქსიმ Piskunov"
+    message = (
+        "გამარჯობა, დავინტერესდით კომპიუტერული კლუბის კომპიუტერებით. "
+        "გვსურს შევიძინოთ 35 კომპიუტერი 5000 დოლარად ნაღდი ანგარიშსწორებით."
+    )
+    chunk_len = 120
+
+    parts = split_user_message(sender, message, chunk_len)
+
+    assert len(parts) > 1
+    for part in parts:
+        assert encoded_len(part) <= chunk_len

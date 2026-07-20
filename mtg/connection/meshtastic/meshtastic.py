@@ -29,7 +29,7 @@ from meshtastic.protobuf import config_pb2
 # pylint:disable=no-name-in-module,no-member
 from setproctitle import setthreadtitle
 
-from mtg.utils import create_fifo, split_message, split_user_message
+from mtg.utils import create_fifo, encoded_len, split_message, split_user_message
 from mtg.connection.mqtt import MQTTInterface
 
 FIFO = '/tmp/mtg.fifo'
@@ -161,7 +161,7 @@ class MeshtasticConnection:
                 results.append(packet)
             return packet
 
-        if len(msg) <= chunk_len:
+        if encoded_len(msg) <= chunk_len:
             with self.lock:
                 _send_single(msg, reply_id)
             return results
@@ -231,7 +231,7 @@ class MeshtasticConnection:
 
         chunk_len = mesh_pb2.Constants.DATA_PAYLOAD_LEN // 2  # pylint:disable=no-member
         full = f"{sender}: {message}"
-        if len(full) <= chunk_len:
+        if encoded_len(full) <= chunk_len:
             return self.send_text(full, reply_id=reply_id, **kwargs)
         parts = split_user_message(sender, message, chunk_len)
         packets = []

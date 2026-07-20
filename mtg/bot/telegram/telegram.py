@@ -190,7 +190,11 @@ class TelegramBot:  # pylint:disable=too-many-instance-attributes,too-many-publi
                         repr(exc),
                         exc_info=True,
                     )
-                database.mark_link_retry(record.id, repr(exc))
+                error = repr(exc)
+                if 'Data payload too big' in error:
+                    database.mark_link_failed(record.id, error)
+                else:
+                    database.mark_link_retry(record.id, error)
 
     def _resend_pending_record(self, record) -> None:
         """Resend a single pending message record."""

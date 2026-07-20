@@ -6,6 +6,7 @@ from .fifo import create_fifo
 from .imp import list_classes
 from .memcache import Memcache
 from .message import (
+    encoded_len,
     split_message,
     split_user_message,
     is_emoji_reaction,

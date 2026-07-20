@@ -2,8 +2,58 @@
 """ message utilities """
 
 
-import textwrap
+import re
 import unicodedata
+
+
+def encoded_len(text: str) -> int:
+    """Return the UTF-8 byte length used by Meshtastic payload limits."""
+
+    return len(text.encode('utf-8'))
+
+
+def _split_raw_by_encoded_len(text: str, max_len: int):
+    """Split continuous text without cutting through a UTF-8 character."""
+
+    chunks = []
+    current = []
+    current_len = 0
+    for char in text:
+        char_len = encoded_len(char)
+        if current and current_len + char_len > max_len:
+            chunks.append(''.join(current))
+            current = []
+            current_len = 0
+        current.append(char)
+        current_len += char_len
+    if current:
+        chunks.append(''.join(current))
+    return chunks
+
+
+def _split_text_by_encoded_len(text: str, max_len: int):
+    """Split text without cutting through a UTF-8 character."""
+
+    if max_len <= 0:
+        raise ValueError('max_len must be positive')
+
+    chunks = []
+    current = []
+    current_len = 0
+    for token in re.findall(r'\S+\s*|\s+', text):
+        token_len = encoded_len(token)
+        if current and current_len + token_len > max_len:
+            chunks.append(''.join(current).rstrip())
+            current = []
+            current_len = 0
+        if token_len > max_len:
+            chunks.extend(_split_raw_by_encoded_len(token.rstrip(), max_len))
+            continue
+        current.append(token)
+        current_len += token_len
+    if current:
+        chunks.append(''.join(current).rstrip())
+    return chunks
 
 
 def split_message(msg, chunk_len, callback, **kwargs) -> None:
@@ -12,47 +62,42 @@ def split_message(msg, chunk_len, callback, **kwargs) -> None:
 
     :return:
     """
-    # split into parts
     parts = []
     part = []
     for line in msg.split('\n'):
         if len(line) == 0:
             continue
-        if len('\n'.join(part) + line) < chunk_len:
+        candidate = '\n'.join(part + [line]) if part else line
+        if encoded_len(candidate) <= chunk_len:
             part.append(line)
         else:
-            parts.append(part)
+            if part:
+                parts.append(part)
             part = [line]
 
-    parts.append(part)
+    if part:
+        parts.append(part)
 
     for part in parts:
         if len(part) == 0:
             continue
         line = '\n'.join(part)
-        if len(line) < chunk_len:
+        if encoded_len(line) <= chunk_len:
             callback(line, **kwargs)
         else:
-            for i in range((len(line) // chunk_len) + 1):
-                callback(line[i*chunk_len:i*chunk_len + chunk_len], **kwargs)
+            for chunk in _split_text_by_encoded_len(line, chunk_len):
+                callback(chunk, **kwargs)
 
 
 def split_user_message(sender: str, msg: str, chunk_len: int):
-    """Split user's message into chunks with sender prefix and counters"""
+    """Split user's message into chunks with sender prefix and counters."""
 
     prefix = f"{sender}: "
-    # initial assumption about parts
     parts_count = 1
     while True:
         counter = f"[{parts_count}/{parts_count}] "
-        available = chunk_len - len(prefix) - len(counter)
-        wrapper = textwrap.TextWrapper(
-            width=available,
-            break_long_words=True,
-            break_on_hyphens=False,
-            replace_whitespace=False,
-        )
-        parts = [p.strip() for p in wrapper.wrap(msg) if p.strip()]
+        available = chunk_len - encoded_len(prefix) - encoded_len(counter)
+        parts = [p.strip() for p in _split_text_by_encoded_len(msg, available) if p.strip()]
         if len(parts) == parts_count:
             break
         parts_count = len(parts)
