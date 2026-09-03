@@ -155,6 +155,18 @@ class TestMeshtasticBot:
 
         meshtastic_bot.logger.debug.assert_called_once()
 
+    def test_on_connection_delegates_lost_event_to_connection_owner(
+        self, meshtastic_bot, mock_meshtastic_connection
+    ):
+        """The bot forwards lifecycle events; reconnection remains owner-owned."""
+        mock_interface = MagicMock()
+
+        meshtastic_bot.on_connection(mock_interface, "meshtastic.connection.lost")
+
+        mock_meshtastic_connection.handle_connection_event.assert_called_once_with(
+            mock_interface, "meshtastic.connection.lost"
+        )
+
     def test_on_node_info(self, meshtastic_bot):
         """Test on_node_info method"""
         meshtastic_bot.logger = MagicMock()

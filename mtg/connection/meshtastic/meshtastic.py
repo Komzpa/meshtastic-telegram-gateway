@@ -61,6 +61,8 @@ class MeshtasticConnection:
         self.mqtt_nodes: Dict[str, Any] = {}
         self.name = 'Meshtastic Connection'
         self.lock = RLock()
+        self._reconnect_lock = RLock()
+        self._reconnect_in_progress = False
         self.fifo_lock = RLock()
         self.filter = filter_class
         parser = getattr(config, 'config', None)
@@ -128,6 +130,57 @@ class MeshtasticConnection:
                 time.sleep(5)
         if last_exc:
             raise last_exc
+
+    def handle_connection_event(self, interface, topic) -> None:
+        """Recover the connection after a post-start Meshtastic disconnect.
+
+        Meshtastic emits connection events from its interface thread.  Keep
+        recovery in this connection owner and run it in one background thread
+        so the event publisher is not blocked by serial open retries.
+        """
+        if topic != 'meshtastic.connection.lost':
+            return
+        if self.exit:
+            self.logger.debug('Ignoring connection loss during shutdown')
+            return
+        with self._reconnect_lock:
+            if self.interface is not None and self.interface is not interface:
+                self.logger.debug('Ignoring stale connection loss callback')
+                return
+            if self._reconnect_in_progress:
+                self.logger.debug('Connection recovery already in progress')
+                return
+            self._reconnect_in_progress = True
+        self.logger.warning('Meshtastic connection lost; starting recovery')
+        thread = Thread(
+            target=self._recover_connection,
+            args=(interface,),
+            daemon=True,
+            name='MeshtasticReconnect',
+        )
+        thread.start()
+
+    def _recover_connection(self, lost_interface) -> None:
+        """Close the lost interface and retry opening the configured device."""
+        try:
+            with self.lock:
+                if self.interface is lost_interface:
+                    self.interface = None
+            try:
+                lost_interface.close()
+            except Exception as exc:  # pylint:disable=broad-except
+                self.logger.warning('Failed to close lost interface: %s', repr(exc))
+            while not self.exit:
+                try:
+                    self.connect()
+                    self.logger.info('Meshtastic connection recovery completed')
+                    return
+                except Exception as exc:  # pylint:disable=broad-except
+                    self.logger.error('Meshtastic connection recovery failed: %s', repr(exc))
+                    time.sleep(5)
+        finally:
+            with self._reconnect_lock:
+                self._reconnect_in_progress = False
 
 
     def send_text(self, msg, reply_id=None, emoji=None, **kwargs):

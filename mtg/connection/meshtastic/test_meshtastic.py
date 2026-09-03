@@ -150,6 +150,67 @@ class TestMeshtasticConnection:
         )
         assert connection.interface == mock_interface
 
+    @patch('mtg.connection.meshtastic.meshtastic.Thread')
+    def test_lost_event_starts_one_recovery_and_established_is_noop(
+        self, mock_thread, meshtastic_connection
+    ):
+        """A post-start loss recovers once; established events do not recover."""
+        old_interface = MagicMock()
+        meshtastic_connection.interface = old_interface
+
+        meshtastic_connection.handle_connection_event(
+            old_interface, 'meshtastic.connection.established'
+        )
+        mock_thread.assert_not_called()
+
+        meshtastic_connection.handle_connection_event(
+            old_interface, 'meshtastic.connection.lost'
+        )
+        meshtastic_connection.handle_connection_event(
+            old_interface, 'meshtastic.connection.lost'
+        )
+        mock_thread.assert_called_once_with(
+            target=meshtastic_connection._recover_connection,
+            args=(old_interface,),
+            daemon=True,
+            name='MeshtasticReconnect',
+        )
+        mock_thread.return_value.start.assert_called_once()
+
+    def test_recovery_closes_lost_interface_and_reconnects(self, meshtastic_connection):
+        """Recovery clears the stale interface before invoking normal retries."""
+        old_interface = MagicMock()
+        new_interface = MagicMock()
+        meshtastic_connection.interface = old_interface
+
+        def reconnect():
+            assert meshtastic_connection.interface is None
+            meshtastic_connection.interface = new_interface
+
+        meshtastic_connection.connect = MagicMock(side_effect=reconnect)
+        meshtastic_connection._recover_connection(old_interface)
+
+        old_interface.close.assert_called_once_with()
+        meshtastic_connection.connect.assert_called_once_with()
+        assert meshtastic_connection.interface is new_interface
+        assert meshtastic_connection._reconnect_in_progress is False
+
+    @patch('mtg.connection.meshtastic.meshtastic.Thread')
+    def test_stale_loss_after_recovery_does_not_replace_new_interface(
+        self, mock_thread, meshtastic_connection
+    ):
+        """A delayed callback from the old interface cannot start recovery again."""
+        old_interface = MagicMock()
+        new_interface = MagicMock()
+        meshtastic_connection.interface = new_interface
+
+        meshtastic_connection.handle_connection_event(
+            old_interface, 'meshtastic.connection.lost'
+        )
+
+        mock_thread.assert_not_called()
+        assert meshtastic_connection.interface is new_interface
+
     def test_send_text_no_interface(self, meshtastic_connection):
         """Test send_text when interface is None"""
         meshtastic_connection.interface = None
