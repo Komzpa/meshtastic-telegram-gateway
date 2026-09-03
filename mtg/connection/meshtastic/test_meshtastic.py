@@ -5,7 +5,7 @@ import time
 import logging
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, Mock, call, mock_open, PropertyMock, ANY
-from threading import Thread
+from threading import Event, Thread
 
 from mtg.connection.meshtastic.meshtastic import MeshtasticConnection
 
@@ -39,13 +39,15 @@ class TestMeshtasticConnection:
     @pytest.fixture
     def meshtastic_connection(self, mock_config, mock_logger, mock_filter):
         """Create MeshtasticConnection instance"""
-        return MeshtasticConnection(
+        connection = MeshtasticConnection(
             dev_path="/dev/ttyUSB0",
             logger=mock_logger,
             config=mock_config,
             filter_class=mock_filter,
             startup_ts=1234567890.0
         )
+        connection.chunk_send_interval = 0
+        return connection
 
     def test_init(self, mock_config, mock_logger, mock_filter):
         """Test MeshtasticConnection initialization"""
@@ -188,12 +190,15 @@ class TestMeshtasticConnection:
             meshtastic_connection.interface = new_interface
 
         meshtastic_connection.connect = MagicMock(side_effect=reconnect)
+        callback = MagicMock()
+        meshtastic_connection.add_reconnect_callback(callback)
         meshtastic_connection._recover_connection(old_interface)
 
         old_interface.close.assert_called_once_with()
         meshtastic_connection.connect.assert_called_once_with()
         assert meshtastic_connection.interface is new_interface
         assert meshtastic_connection._reconnect_in_progress is False
+        callback.assert_called_once_with()
 
     @patch('mtg.connection.meshtastic.meshtastic.Thread')
     def test_stale_loss_after_recovery_does_not_replace_new_interface(
@@ -234,7 +239,7 @@ class TestMeshtasticConnection:
         """Test send_text with long message that needs splitting"""
         mock_mesh_pb2.Constants.DATA_PAYLOAD_LEN = 20
         mock_interface = MagicMock()
-        sent_packets = [SimpleNamespace(id=1), SimpleNamespace(id=2), SimpleNamespace(id=3)]
+        sent_packets = [SimpleNamespace(id=1), SimpleNamespace(id=2)]
         mock_interface.sendText.side_effect = sent_packets
         meshtastic_connection.interface = mock_interface
 
@@ -245,19 +250,19 @@ class TestMeshtasticConnection:
 
         assert result == sent_packets
         assert mock_interface.sendText.call_args_list == [
-            call("abcdefghij", destinationId="12345"),
-            call("klmnopqrst", destinationId="12345"),
+            call("abcdefghijklmnopqrst", destinationId="12345"),
             call("uvwxyz", destinationId="12345"),
         ]
 
     @patch('mtg.connection.meshtastic.meshtastic.mesh_pb2')
-    def test_send_text_multipart_reply_reuses_original_reply_id(self, mock_mesh_pb2, meshtastic_connection):
-        """Multipart replies should not reply to their own previous parts."""
+    def test_send_text_multipart_reply_only_marks_first_part(self, mock_mesh_pb2, meshtastic_connection):
+        """Only the first part should render a native reply preview."""
         mock_mesh_pb2.Constants.DATA_PAYLOAD_LEN = 20
         mock_interface = MagicMock()
-        sent_packets = [SimpleNamespace(id=101), SimpleNamespace(id=102), SimpleNamespace(id=103)]
+        sent_packets = [SimpleNamespace(id=101), SimpleNamespace(id=102)]
         meshtastic_connection.interface = mock_interface
-        meshtastic_connection._send_rich_text = MagicMock(side_effect=sent_packets)
+        meshtastic_connection._send_rich_text = MagicMock(return_value=sent_packets[0])
+        mock_interface.sendText.return_value = sent_packets[1]
 
         result = meshtastic_connection.send_text(
             "abcdefghijklmnopqrstuvwxyz",
@@ -266,30 +271,98 @@ class TestMeshtasticConnection:
         )
 
         assert result == sent_packets
-        assert [
-            send_call.kwargs["reply_id"]
-            for send_call in meshtastic_connection._send_rich_text.call_args_list
-        ] == [42, 42, 42]
+        meshtastic_connection._send_rich_text.assert_called_once_with(
+            "abcdefghijklmnopqrst",
+            reply_id=42,
+            emoji=None,
+            destinationId="12345",
+        )
+        mock_interface.sendText.assert_called_once_with("uvwxyz", destinationId="12345")
 
     @patch('mtg.connection.meshtastic.meshtastic.mesh_pb2')
-    def test_send_user_text_multipart_reuses_original_reply_id(self, mock_mesh_pb2, meshtastic_connection):
-        """User-prefixed multipart messages keep replying to the original mesh packet."""
+    def test_send_user_text_multipart_is_atomic_and_only_first_part_replies(
+        self, mock_mesh_pb2, meshtastic_connection
+    ):
+        """A user message is one paced send group with one reply preview."""
         mock_mesh_pb2.Constants.DATA_PAYLOAD_LEN = 60
         packets = [SimpleNamespace(id=10), SimpleNamespace(id=11), SimpleNamespace(id=12)]
-        meshtastic_connection.send_text = MagicMock(side_effect=[[packet] for packet in packets])
+        meshtastic_connection._send_parts = MagicMock(return_value=packets)
 
         result = meshtastic_connection.send_user_text(
             "Telegram User",
-            "abcdefghijklmnopqrstuvwxyz",
+            "abcdefghijklmnopqrstuvwxyz" * 4,
             reply_id=77,
             destinationId="12345",
         )
 
         assert result == packets
-        assert all(
-            send_call.kwargs["reply_id"] == 77
-            for send_call in meshtastic_connection.send_text.call_args_list
+        parts = meshtastic_connection._send_parts.call_args.args[0]
+        assert len(parts) >= 2
+        assert all(len(part.encode('utf-8')) <= 60 for part in parts)
+        assert meshtastic_connection._send_parts.call_args.kwargs == {
+            'reply_id': 77,
+            'destinationId': '12345',
+        }
+
+    @patch('mtg.connection.meshtastic.meshtastic.mesh_pb2')
+    def test_multipart_send_paces_every_following_packet(
+        self, mock_mesh_pb2, meshtastic_connection
+    ):
+        """Packets enter the radio queue at the configured interval."""
+        mock_mesh_pb2.Constants.DATA_PAYLOAD_LEN = 20
+        meshtastic_connection.chunk_send_interval = 2.0
+        meshtastic_connection._chunk_sleep = MagicMock()
+        meshtastic_connection.interface = MagicMock()
+        meshtastic_connection.interface.sendText.side_effect = [
+            SimpleNamespace(id=1),
+            SimpleNamespace(id=2),
+        ]
+
+        meshtastic_connection.send_text('abcdefghijklmnopqrstuvwxyz')
+
+        meshtastic_connection._chunk_sleep.assert_called_once_with(2.0)
+
+    @patch('mtg.connection.meshtastic.meshtastic.mesh_pb2')
+    def test_concurrent_multipart_messages_cannot_interleave(
+        self, mock_mesh_pb2, meshtastic_connection
+    ):
+        """The message lock covers every part of one logical message."""
+        mock_mesh_pb2.Constants.DATA_PAYLOAD_LEN = 30
+        first_packet_started = Event()
+        release_first_packet = Event()
+        sent = []
+
+        def send_text(part, **_kwargs):
+            sent.append(part)
+            if len(sent) == 1:
+                first_packet_started.set()
+                assert release_first_packet.wait(timeout=1)
+            return SimpleNamespace(id=len(sent))
+
+        meshtastic_connection.interface = MagicMock()
+        meshtastic_connection.interface.sendText.side_effect = send_text
+        first = Thread(
+            target=meshtastic_connection.send_user_text,
+            args=('First', 'a' * 100),
         )
+        second = Thread(
+            target=meshtastic_connection.send_user_text,
+            args=('Second', 'b' * 100),
+        )
+
+        first.start()
+        assert first_packet_started.wait(timeout=1)
+        second.start()
+        release_first_packet.set()
+        first.join(timeout=1)
+        second.join(timeout=1)
+
+        assert not first.is_alive()
+        assert not second.is_alive()
+        first_count = sum(part.startswith('First:') for part in sent)
+        assert first_count >= 2
+        assert all(part.startswith('First:') for part in sent[:first_count])
+        assert all(part.startswith('Second:') for part in sent[first_count:])
 
     def test_send_data_no_interface(self, meshtastic_connection):
         """Test send_data when interface is None"""

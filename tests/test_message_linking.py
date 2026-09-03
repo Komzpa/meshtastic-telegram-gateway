@@ -199,8 +199,9 @@ def test_existing_database_with_32bit_constraints_is_migrated(tmp_path, meshtast
         restored_db.close()
 
 
-def test_send_user_text_multipart_chain():
+def test_send_user_text_multipart_keeps_one_atomic_group():
     connection = MeshtasticConnection("test", logging.getLogger("test"), None, None)
+    connection.chunk_send_interval = 0
     fake_interface = FakeInterface()
     connection.interface = fake_interface
 
@@ -209,9 +210,7 @@ def test_send_user_text_multipart_chain():
 
     assert len(packets) == len(fake_interface.sent_packets) >= 2
     assert fake_interface.sent_packets[0]["reply_id"] is None
-    for idx in range(1, len(fake_interface.sent_packets)):
-        prev_packet = fake_interface.sent_packets[idx - 1]["packet"]
-        assert fake_interface.sent_packets[idx]["reply_id"] == prev_packet.id
+    assert all(packet["reply_id"] is None for packet in fake_interface.sent_packets[1:])
 
 
 def test_reply_lookup_for_multipart_chain(meshtastic_db):  # pylint:disable=redefined-outer-name

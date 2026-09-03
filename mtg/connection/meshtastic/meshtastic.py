@@ -4,13 +4,13 @@
 import configparser
 import logging
 import re
-import sys
 import time
 import json
 #
 from threading import RLock, Thread
 from typing import (
     Any,
+    Callable,
     Dict,
     List,
     Optional,
@@ -34,6 +34,7 @@ from mtg.connection.mqtt import MQTTInterface
 
 FIFO = '/tmp/mtg.fifo'
 FIFO_CMD = '/tmp/mtg.cmd.fifo'
+MESH_CHUNK_INTERVAL_SECONDS = 2.0
 
 
 # pylint:disable=too-many-instance-attributes,too-many-public-methods
@@ -63,6 +64,9 @@ class MeshtasticConnection:
         self.lock = RLock()
         self._reconnect_lock = RLock()
         self._reconnect_in_progress = False
+        self._reconnect_callbacks: List[Callable[[], None]] = []
+        self.chunk_send_interval = MESH_CHUNK_INTERVAL_SECONDS
+        self._chunk_sleep = time.sleep
         self.fifo_lock = RLock()
         self.filter = filter_class
         parser = getattr(config, 'config', None)
@@ -160,8 +164,22 @@ class MeshtasticConnection:
         )
         thread.start()
 
+    def add_reconnect_callback(self, callback: Callable[[], None]) -> None:
+        """Run callback after a lost Meshtastic connection has recovered."""
+        if callback not in self._reconnect_callbacks:
+            self._reconnect_callbacks.append(callback)
+
+    def _notify_reconnected(self) -> None:
+        """Resume connection-dependent work after the interface is usable."""
+        for callback in self._reconnect_callbacks:
+            try:
+                callback()
+            except Exception as exc:  # pylint:disable=broad-except
+                self.logger.error('Meshtastic reconnect callback failed: %s', repr(exc))
+
     def _recover_connection(self, lost_interface) -> None:
         """Close the lost interface and retry opening the configured device."""
+        recovered = False
         try:
             with self.lock:
                 if self.interface is lost_interface:
@@ -174,68 +192,63 @@ class MeshtasticConnection:
                 try:
                     self.connect()
                     self.logger.info('Meshtastic connection recovery completed')
-                    return
+                    recovered = True
+                    break
                 except Exception as exc:  # pylint:disable=broad-except
                     self.logger.error('Meshtastic connection recovery failed: %s', repr(exc))
                     time.sleep(5)
         finally:
             with self._reconnect_lock:
                 self._reconnect_in_progress = False
+        if recovered:
+            self._notify_reconnected()
 
+    def _send_parts(self, parts, reply_id=None, emoji=None, **kwargs):
+        """Send one logical message without letting other messages interleave."""
+        send_kwargs = dict(kwargs)
+        results = []
+        with self.lock:
+            for index, part in enumerate(parts):
+                if self.interface is None:
+                    break
+                target_reply_id = reply_id if index == 0 else None
+                target_emoji = emoji if index == 0 else None
+                log_data = {
+                    "event": "send_mesh",
+                    "message": part,
+                    "kwargs": send_kwargs,
+                    "reply_id": target_reply_id,
+                    "emoji": target_emoji,
+                }
+                self.logger.info(json.dumps(log_data))
+                if target_reply_id is not None or target_emoji is not None:
+                    packet = self._send_rich_text(
+                        part,
+                        reply_id=target_reply_id,
+                        emoji=target_emoji,
+                        **send_kwargs,
+                    )
+                else:
+                    packet = self.interface.sendText(part, **send_kwargs)
+                if packet:
+                    results.append(packet)
+                else:
+                    break
+                if index + 1 < len(parts) and self.chunk_send_interval > 0:
+                    self._chunk_sleep(self.chunk_send_interval)
+        return results
 
     def send_text(self, msg, reply_id=None, emoji=None, **kwargs):
         """Send a Meshtastic message, optionally as a reply or reaction."""
         if self.interface is None:
             return []
 
-        log_data = {
-            "event": "send_mesh",
-            "message": msg,
-            "kwargs": kwargs,
-            "reply_id": reply_id,
-            "emoji": emoji,
-        }
-        self.logger.info(json.dumps(log_data))
-        chunk_len = mesh_pb2.Constants.DATA_PAYLOAD_LEN // 2  # pylint:disable=no-member
-        send_kwargs = dict(kwargs)
-        results = []
-
-        def _send_single(part, target_reply_id):
-            if target_reply_id is None and emoji is None:
-                packet = self.interface.sendText(part, **send_kwargs)
-            else:
-                packet = self._send_rich_text(
-                    part,
-                    reply_id=target_reply_id,
-                    emoji=emoji,
-                    **send_kwargs,
-                )
-            if packet:
-                results.append(packet)
-            return packet
-
-        if encoded_len(msg) <= chunk_len:
-            with self.lock:
-                _send_single(msg, reply_id)
-            return results
-
-        with self.lock:
-            def _send_part(part, **cb_kwargs):
-                cb_kwargs = dict(cb_kwargs)
-                if reply_id is not None or emoji is not None:
-                    packet = self._send_rich_text(
-                        part,
-                        reply_id=reply_id,
-                        emoji=emoji,
-                        **cb_kwargs,
-                    )
-                else:
-                    packet = self.interface.sendText(part, **cb_kwargs)
-                if packet:
-                    results.append(packet)
-
-            split_message(msg, chunk_len, _send_part, **send_kwargs)
-        return results
+        chunk_len = mesh_pb2.Constants.DATA_PAYLOAD_LEN  # pylint:disable=no-member
+        parts = []
+        split_message(msg, chunk_len, lambda part, **_kwargs: parts.append(part))
+        if not parts and (msg == '' or emoji is not None):
+            parts = [msg]
+        return self._send_parts(parts, reply_id=reply_id, emoji=emoji, **kwargs)
 
     def _send_rich_text(self, msg, reply_id=None, emoji=None, **kwargs):
         """Send text that needs extra metadata like reply IDs or emoji reactions."""
@@ -273,17 +286,13 @@ class MeshtasticConnection:
     def send_user_text(self, sender: str, message: str, reply_id=None, **kwargs):
         """Send text message from a specific sender with automatic splitting."""
 
-        chunk_len = mesh_pb2.Constants.DATA_PAYLOAD_LEN // 2  # pylint:disable=no-member
+        chunk_len = mesh_pb2.Constants.DATA_PAYLOAD_LEN  # pylint:disable=no-member
         full = f"{sender}: {message}"
         if encoded_len(full) <= chunk_len:
-            return self.send_text(full, reply_id=reply_id, **kwargs)
-        parts = split_user_message(sender, message, chunk_len)
-        packets = []
-        for part in parts:
-            sent_packets = self.send_text(part, reply_id=reply_id, **kwargs)
-            if sent_packets:
-                packets.extend(sent_packets)
-        return packets
+            parts = [full]
+        else:
+            parts = split_user_message(sender, message, chunk_len)
+        return self._send_parts(parts, reply_id=reply_id, **kwargs)
 
     def send_data(self, *args, **kwargs) -> None:
         """

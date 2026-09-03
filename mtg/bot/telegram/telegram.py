@@ -9,11 +9,11 @@ import os
 import re
 import tempfile
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from importlib.metadata import version as importlib_version
 from typing import Optional, Tuple
 #
-from threading import Thread
+from threading import Lock, Thread
 from urllib.parse import urlparse
 #
 import humanize
@@ -33,6 +33,9 @@ from mtg.database import (
 from mtg.filter import TelegramFilter
 from mtg.log import VERSION
 from mtg.utils import split_message, is_emoji_reaction, first_emoji_codepoint
+
+
+PENDING_MESH_MAX_AGE = timedelta(minutes=15)
 
 
 def check_room(func):
@@ -82,6 +85,8 @@ class TelegramBot:  # pylint:disable=too-many-instance-attributes,too-many-publi
         self._notifications_room_id: Optional[int] = None
         self._admin_id: Optional[int] = None
         self._bot_in_rooms: bool = False
+        self._pending_delivery_lock = Lock()
+        self._reconnect_callback_registered = False
 
 
         start_handler = CommandHandler('start', self.start)
@@ -151,6 +156,14 @@ class TelegramBot:  # pylint:disable=too-many-instance-attributes,too-many-publi
         """
         self.logger = logger
         self._refresh_cached_config()
+        register_callback = getattr(
+            self.meshtastic_connection,
+            'add_reconnect_callback',
+            None,
+        )
+        if callable(register_callback) and not self._reconnect_callback_registered:
+            register_callback(self._deliver_pending_messages)
+            self._reconnect_callback_registered = True
         self._deliver_pending_messages()
 
     def set_filter(self, filter_class: TelegramFilter):
@@ -163,40 +176,59 @@ class TelegramBot:  # pylint:disable=too-many-instance-attributes,too-many-publi
         self.filter = filter_class
 
     def _deliver_pending_messages(self) -> None:
-        """Attempt to resend any pending Telegram-to-Meshtastic messages."""
+        """Replay a fresh FIFO tail after startup or connection recovery."""
 
         if not hasattr(self.meshtastic_connection, 'database'):
             return
+        if not self._pending_delivery_lock.acquire(  # pylint:disable=consider-using-with
+            blocking=False
+        ):
+            return
         database = self.meshtastic_connection.database
         try:
-            pending = list(database.iter_pending_links(MESSAGE_DIRECTION_TELEGRAM_TO_MESH))
-        except Exception as exc:  # pylint:disable=broad-except
-            if self.logger:
-                self.logger.error(
-                    'Failed to load pending Telegram messages: %s',
-                    repr(exc),
-                    exc_info=True,
-                )
-            return
-
-        for record in pending:
             try:
-                self._resend_pending_record(record)
+                pending = sorted(
+                    database.iter_pending_links(MESSAGE_DIRECTION_TELEGRAM_TO_MESH),
+                    key=lambda record: (record.created_at, record.id),
+                )
             except Exception as exc:  # pylint:disable=broad-except
                 if self.logger:
                     self.logger.error(
-                        'Pending Telegram message %s failed: %s',
-                        record.id,
+                        'Failed to load pending Telegram messages: %s',
                         repr(exc),
                         exc_info=True,
                     )
-                error = repr(exc)
-                if 'Data payload too big' in error:
-                    database.mark_link_failed(record.id, error)
-                else:
-                    database.mark_link_retry(record.id, error)
+                return
 
-    def _resend_pending_record(self, record) -> None:
+            cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - PENDING_MESH_MAX_AGE
+            for record in pending:
+                if record.created_at < cutoff:
+                    database.mark_link_failed(
+                        record.id,
+                        'expired pending Telegram-to-Meshtastic message',
+                    )
+                    continue
+                try:
+                    if not self._resend_pending_record(record):
+                        break
+                except Exception as exc:  # pylint:disable=broad-except
+                    if self.logger:
+                        self.logger.error(
+                            'Pending Telegram message %s failed: %s',
+                            record.id,
+                            repr(exc),
+                            exc_info=True,
+                        )
+                    error = repr(exc)
+                    if 'Data payload too big' in error:
+                        database.mark_link_failed(record.id, error)
+                        continue
+                    database.mark_link_retry(record.id, error)
+                    break
+        finally:
+            self._pending_delivery_lock.release()
+
+    def _resend_pending_record(self, record) -> bool:
         """Resend a single pending message record."""
 
         database = self.meshtastic_connection.database
@@ -207,14 +239,14 @@ class TelegramBot:  # pylint:disable=too-many-instance-attributes,too-many-publi
         sanitized_emoji = self._coerce_optional_int(record.emoji, context='pending emoji code')
         if record.reply_to_packet_id is not None and sanitized_reply_id is None:
             database.mark_link_failed(record.id, 'invalid reply_to_packet_id value')
-            return
+            return True
         if record.emoji is not None and sanitized_emoji is None:
             database.mark_link_failed(record.id, 'invalid emoji value')
-            return
+            return True
         if sanitized_emoji is not None:
             if sanitized_reply_id is None:
                 database.mark_link_failed(record.id, 'missing reply target for emoji reaction')
-                return
+                return True
             packets = self.meshtastic_connection.send_text(
                 '',
                 reply_id=sanitized_reply_id,
@@ -230,13 +262,14 @@ class TelegramBot:  # pylint:disable=too-many-instance-attributes,too-many-publi
             )
         if not packets:
             database.mark_link_retry(record.id, 'meshtastic send returned None')
-            return
+            return False
         self._mark_meshtastic_packets_sent(
             database,
             record.id,
             packets,
             previous_packet_id=sanitized_reply_id,
         )
+        return True
 
     @staticmethod
     def _split_sender_payload(text: str) -> Tuple[Optional[str], str]:

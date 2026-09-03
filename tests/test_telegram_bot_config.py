@@ -2,8 +2,9 @@
 
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 
@@ -166,6 +167,93 @@ def test_resend_pending_record_marks_invalid_reply_id(
     meshtastic_connection.send_text.assert_not_called()
     meshtastic_connection.database.mark_link_failed.assert_called_once_with(
         7, 'invalid reply_to_packet_id value'
+    )
+
+
+def test_pending_replay_expires_stale_and_sends_fresh_fifo(
+    tmp_path,
+    meshtastic_connection,
+    telegram_connection,
+):
+    """An outage cannot dump old chat history back into the mesh."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    stale = SimpleNamespace(id=1, created_at=now - timedelta(hours=1))
+    fresh_second = SimpleNamespace(
+        id=3,
+        created_at=now - timedelta(minutes=1),
+        reply_to_packet_id=None,
+        emoji=None,
+        sender='Third',
+        payload='three',
+    )
+    fresh_first = SimpleNamespace(
+        id=2,
+        created_at=now - timedelta(minutes=2),
+        reply_to_packet_id=None,
+        emoji=None,
+        sender='Second',
+        payload='two',
+    )
+    meshtastic_connection.database.iter_pending_links.return_value = [
+        fresh_second,
+        stale,
+        fresh_first,
+    ]
+    meshtastic_connection.send_user_text.side_effect = [
+        [SimpleNamespace(id=20)],
+        [SimpleNamespace(id=30)],
+    ]
+    config = build_config(tmp_path)
+
+    bot = TelegramBot(config, meshtastic_connection, telegram_connection)
+    bot.set_logger(logging.getLogger('test-telegram-bot'))
+
+    meshtastic_connection.database.mark_link_failed.assert_called_once_with(
+        1,
+        'expired pending Telegram-to-Meshtastic message',
+    )
+    assert [call.args[:2] for call in meshtastic_connection.send_user_text.call_args_list] == [
+        ('Second', 'two'),
+        ('Third', 'three'),
+    ]
+    meshtastic_connection.add_reconnect_callback.assert_called_once_with(
+        bot._deliver_pending_messages
+    )
+
+
+def test_pending_replay_stops_at_first_transport_failure(
+    tmp_path,
+    meshtastic_connection,
+    telegram_connection,
+):
+    """One dead interface must not cause a 30-second retry per queued message."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    records = [
+        SimpleNamespace(
+            id=index,
+            created_at=now,
+            reply_to_packet_id=None,
+            emoji=None,
+            sender='Sender',
+            payload=str(index),
+        )
+        for index in (1, 2)
+    ]
+    meshtastic_connection.database.iter_pending_links.return_value = records
+    meshtastic_connection.send_user_text.return_value = []
+    config = build_config(tmp_path)
+
+    bot = TelegramBot(config, meshtastic_connection, telegram_connection)
+    bot.set_logger(logging.getLogger('test-telegram-bot'))
+
+    meshtastic_connection.send_user_text.assert_called_once_with(
+        'Sender',
+        '1',
+        reply_id=None,
+    )
+    meshtastic_connection.database.mark_link_retry.assert_called_once_with(
+        1,
+        'meshtastic send returned None',
     )
 
 
