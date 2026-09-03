@@ -177,7 +177,7 @@ def test_pending_replay_expires_stale_and_sends_fresh_fifo(
 ):
     """An outage cannot dump old chat history back into the mesh."""
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    stale = SimpleNamespace(id=1, created_at=now - timedelta(hours=1))
+    stale = SimpleNamespace(id=1, created_at=now - timedelta(days=1, seconds=1))
     fresh_second = SimpleNamespace(
         id=3,
         created_at=now - timedelta(minutes=1),
@@ -188,7 +188,7 @@ def test_pending_replay_expires_stale_and_sends_fresh_fifo(
     )
     fresh_first = SimpleNamespace(
         id=2,
-        created_at=now - timedelta(minutes=2),
+        created_at=now - timedelta(hours=23, minutes=59),
         reply_to_packet_id=None,
         emoji=None,
         sender='Second',

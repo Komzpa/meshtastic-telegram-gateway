@@ -35,7 +35,7 @@ from mtg.log import VERSION
 from mtg.utils import split_message, is_emoji_reaction, first_emoji_codepoint
 
 
-PENDING_MESH_MAX_AGE = timedelta(minutes=15)
+PENDING_MESH_MAX_AGE = timedelta(days=1)
 
 
 def check_room(func):
