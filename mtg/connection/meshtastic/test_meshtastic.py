@@ -216,6 +216,52 @@ class TestMeshtasticConnection:
         mock_thread.assert_not_called()
         assert meshtastic_connection.interface is new_interface
 
+    def test_health_watchdog_recovers_when_lost_event_is_not_delivered(
+        self, meshtastic_connection
+    ):
+        """A cleared interface state starts normal recovery without pubsub."""
+        disconnected_interface = MagicMock()
+        disconnected_interface.isConnected = Event()
+        meshtastic_connection.interface = disconnected_interface
+        meshtastic_connection._health_watchdog_stop = Event()
+        meshtastic_connection._health_watchdog_stop.set()
+        meshtastic_connection.handle_connection_event = MagicMock()
+
+        meshtastic_connection._watch_connection_health()
+
+        meshtastic_connection.handle_connection_event.assert_called_once_with(
+            disconnected_interface, 'meshtastic.connection.lost'
+        )
+
+    def test_health_watchdog_leaves_connected_interface_alone(
+        self, meshtastic_connection
+    ):
+        """A connected interface must not begin a duplicate recovery."""
+        connected_interface = MagicMock()
+        connected_interface.isConnected = Event()
+        connected_interface.isConnected.set()
+        meshtastic_connection.interface = connected_interface
+        meshtastic_connection._health_watchdog_stop = Event()
+        meshtastic_connection._health_watchdog_stop.set()
+        meshtastic_connection.handle_connection_event = MagicMock()
+
+        meshtastic_connection._watch_connection_health()
+
+        meshtastic_connection.handle_connection_event.assert_not_called()
+
+    @patch('mtg.connection.meshtastic.meshtastic.Thread')
+    def test_health_watchdog_starts_once(self, mock_thread, meshtastic_connection):
+        """Reconnects keep one watchdog instead of accumulating threads."""
+        meshtastic_connection._start_connection_health_watchdog()
+        meshtastic_connection._start_connection_health_watchdog()
+
+        mock_thread.assert_called_once_with(
+            target=meshtastic_connection._watch_connection_health,
+            daemon=True,
+            name='MeshtasticHealth',
+        )
+        mock_thread.return_value.start.assert_called_once_with()
+
     def test_send_text_no_interface(self, meshtastic_connection):
         """Test send_text when interface is None"""
         meshtastic_connection.interface = None

@@ -7,7 +7,7 @@ import re
 import time
 import json
 #
-from threading import RLock, Thread
+from threading import Event, RLock, Thread
 from typing import (
     Any,
     Callable,
@@ -35,6 +35,7 @@ from mtg.connection.mqtt import MQTTInterface
 FIFO = '/tmp/mtg.fifo'
 FIFO_CMD = '/tmp/mtg.cmd.fifo'
 MESH_CHUNK_INTERVAL_SECONDS = 2.0
+MESH_CONNECTION_HEALTH_INTERVAL_SECONDS = 5.0
 
 
 # pylint:disable=too-many-instance-attributes,too-many-public-methods
@@ -65,6 +66,10 @@ class MeshtasticConnection:
         self._reconnect_lock = RLock()
         self._reconnect_in_progress = False
         self._reconnect_callbacks: List[Callable[[], None]] = []
+        self._health_watchdog_lock = RLock()
+        self._health_watchdog_started = False
+        self._health_watchdog_stop = Event()
+        self.connection_health_interval = MESH_CONNECTION_HEALTH_INTERVAL_SECONDS
         self.chunk_send_interval = MESH_CHUNK_INTERVAL_SECONDS
         self._chunk_sleep = time.sleep
         self.fifo_lock = RLock()
@@ -120,6 +125,7 @@ class MeshtasticConnection:
         while retries < 3:
             try:
                 self._connect_once()
+                self._start_connection_health_watchdog()
                 return
             except Exception as exc:  # pylint:disable=broad-except
                 last_exc = exc
@@ -134,6 +140,29 @@ class MeshtasticConnection:
                 time.sleep(5)
         if last_exc:
             raise last_exc
+
+    def _start_connection_health_watchdog(self) -> None:
+        """Watch the interface state when a library disconnect event is missed."""
+        with self._health_watchdog_lock:
+            if self.exit or self._health_watchdog_started:
+                return
+            self._health_watchdog_started = True
+        thread = Thread(
+            target=self._watch_connection_health,
+            daemon=True,
+            name='MeshtasticHealth',
+        )
+        thread.start()
+
+    def _watch_connection_health(self) -> None:
+        """Recover if Meshtastic marks the current interface disconnected."""
+        while not self.exit:
+            interface = self.interface
+            connection_state = getattr(interface, 'isConnected', None)
+            if isinstance(connection_state, Event) and not connection_state.is_set():
+                self.handle_connection_event(interface, 'meshtastic.connection.lost')
+            if self._health_watchdog_stop.wait(self.connection_health_interval):
+                break
 
     def handle_connection_event(self, interface, topic) -> None:
         """Recover the connection after a post-start Meshtastic disconnect.
@@ -652,6 +681,7 @@ class MeshtasticConnection:
         Stop Meshtastic connection
         """
         self.exit = True
+        self._health_watchdog_stop.set()
 
     def run(self):
         """
