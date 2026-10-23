@@ -1,0 +1,20 @@
+[Unit]
+Description=Meshtastic Telegram Gateway - Mesh Service
+# network-online.target alone is not enough: dhcpcd -b reaches it before any
+# lease, and a lease does not prove Telegram is reachable. ExecStartPre below
+# waits for the actual Bot API endpoint.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+WorkingDirectory=/home/pi/meshtastic-telegram-gateway
+ExecStartPre=/bin/sh -c 'until curl -s -o /dev/null --max-time 5 https://api.telegram.org/; do echo "waiting for api.telegram.org"; sleep 5; done'
+ExecStart=/usr/bin/make run
+TimeoutStartSec=infinity
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

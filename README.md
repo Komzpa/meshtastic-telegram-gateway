@@ -116,6 +116,18 @@ For example, the Raspberry Pi deployment in this repo is managed by `systemd`, e
 
 ### Typical systemd workflow
 
+The canonical unit is `doc/meshtastic-mesh.service`. It holds the gateway back
+until `api.telegram.org` answers, so a boot without network does not start a
+gateway whose Telegram poller cannot connect. Install or refresh it with:
+
+```bash
+sudo cp doc/meshtastic-mesh.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable meshtastic-mesh.service
+```
+
+Routine update:
+
 ```bash
 git pull --ff-only
 pip3 install -r requirements.txt
