@@ -119,6 +119,7 @@ class TestTelegramConnection:
                         allowed_updates=['mocked_all_types'],
                         close_loop=False,
                         stop_signals=None,
+                        bootstrap_retries=-1,
                     )
                     # Check that start_queue_processor was called
                     mock_loop.run_until_complete.assert_called_once()

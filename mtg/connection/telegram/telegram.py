@@ -197,6 +197,9 @@ class TelegramConnection:  # pylint:disable=too-many-instance-attributes
             allowed_updates=Update.ALL_TYPES,
             close_loop=False,
             stop_signals=None,
+            # Network may still be down at boot; keep retrying instead of
+            # letting initialize() kill the poller thread.
+            bootstrap_retries=-1,
         )
 
     def shutdown(self) -> None:

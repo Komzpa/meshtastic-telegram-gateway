@@ -87,6 +87,7 @@ class TelegramBot:  # pylint:disable=too-many-instance-attributes,too-many-publi
         self._bot_in_rooms: bool = False
         self._pending_delivery_lock = Lock()
         self._reconnect_callback_registered = False
+        self._shutdown_requested = False
 
 
         start_handler = CommandHandler('start', self.start)
@@ -769,9 +770,22 @@ class TelegramBot:  # pylint:disable=too-many-instance-attributes,too-many-publi
         """
         Telegram bot poller. Uses connection under the hood
 
+        Polling runs in a plain thread while the main loop and Meshtastic
+        threads keep the process alive, so a dead poller would silently stop
+        Telegram->mesh forwarding forever. Exit the whole process instead and
+        let the external supervisor restart the gateway.
+
         :return:
         """
-        self.telegram_connection.poll()
+        try:
+            self.telegram_connection.poll()
+        except Exception:  # pylint: disable=broad-exception-caught
+            self._get_logger().exception('Telegram polling crashed')
+        if self._shutdown_requested:
+            return
+        self._get_logger().critical('Telegram polling stopped unexpectedly, exiting for restart')
+        logging.shutdown()
+        os._exit(1)  # pylint: disable=protected-access
 
     @check_room
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -976,6 +990,7 @@ class TelegramBot:  # pylint:disable=too-many-instance-attributes,too-many-publi
         """
         Telegram bot shutdown method
         """
+        self._shutdown_requested = True
         self.telegram_connection.shutdown()
 
     def run(self):
